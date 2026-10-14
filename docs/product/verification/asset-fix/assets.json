@@ -1,0 +1,236 @@
+{
+  "base": "http://127.0.0.1:5173/",
+  "assets": [
+    {
+      "asset": "media/art-0.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 35840,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-1.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 31981,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-2.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 34796,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-3.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 29186,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-4.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 32135,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-5.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 36547,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-6.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 33363,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-7.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 31977,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-8.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 32647,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-9.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 33612,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-10.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 31831,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-11.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 36577,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-12.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 35902,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-13.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 34122,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-14.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 34760,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-15.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 33946,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/art-16.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "bytes": 33416,
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "media/motion-study.webm",
+      "status": 200,
+      "type": "video/webm",
+      "bytes": 631913,
+      "decoded": {
+        "width": 960,
+        "height": 540,
+        "duration": 11.958599,
+        "advanced": true
+      }
+    },
+    {
+      "asset": "brand/lolixco-wordmark-reference.png",
+      "status": 200,
+      "type": "image/png",
+      "bytes": 327061,
+      "decoded": {
+        "width": 2172,
+        "height": 724
+      }
+    },
+    {
+      "asset": "brand/lolixco-icon-reference.png",
+      "status": 200,
+      "type": "image/png",
+      "bytes": 1373343,
+      "decoded": {
+        "width": 1254,
+        "height": 1254
+      }
+    }
+  ],
+  "byteRangeStatus": 206,
+  "renderedReferences": [
+    "/brand/lolixco-wordmark-reference.png",
+    "/media/motion-study.webm",
+    "/media/art-0.svg",
+    "/media/art-1.svg",
+    "/media/art-2.svg",
+    "/media/art-3.svg",
+    "/media/art-4.svg",
+    "/media/art-5.svg",
+    "/media/art-6.svg",
+    "/media/art-7.svg",
+    "/media/art-8.svg",
+    "/media/art-9.svg",
+    "/media/art-10.svg",
+    "/media/art-11.svg",
+    "/media/art-12.svg",
+    "/media/art-13.svg",
+    "/media/art-14.svg",
+    "/media/art-15.svg",
+    "/media/art-16.svg",
+    "/media/art-1.svg",
+    "/media/art-2.svg",
+    "/media/art-3.svg",
+    "/media/art-4.svg"
+  ],
+  "cleanLoadHttpErrors": [],
+  "pageErrors": [],
+  "fallbackAndRetry": "passed"
+}
