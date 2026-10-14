@@ -1,0 +1,212 @@
+{
+  "results": [
+    {
+      "asset": "/media/art-0.svg",
+      "bytes": 35840,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-1.svg",
+      "bytes": 31981,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-10.svg",
+      "bytes": 31831,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-11.svg",
+      "bytes": 36577,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-12.svg",
+      "bytes": 35902,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-13.svg",
+      "bytes": 34122,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-14.svg",
+      "bytes": 34760,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-15.svg",
+      "bytes": 33946,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-16.svg",
+      "bytes": 33416,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-2.svg",
+      "bytes": 34796,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-3.svg",
+      "bytes": 29186,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-4.svg",
+      "bytes": 32135,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-5.svg",
+      "bytes": 36547,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-6.svg",
+      "bytes": 33363,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-7.svg",
+      "bytes": 31977,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-8.svg",
+      "bytes": 32647,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/art-9.svg",
+      "bytes": 33612,
+      "status": 200,
+      "type": "image/svg+xml",
+      "decoded": {
+        "width": 267,
+        "height": 150
+      }
+    },
+    {
+      "asset": "/media/motion-study.webm",
+      "bytes": 631913,
+      "status": 200,
+      "type": "video/webm",
+      "decoded": {
+        "width": 960,
+        "height": 540,
+        "duration": 11.958599,
+        "time": 0.274004
+      }
+    },
+    {
+      "asset": "/brand/lolixco-icon-reference.png",
+      "bytes": 1373343,
+      "status": 200,
+      "type": "image/png",
+      "decoded": {
+        "width": 1254,
+        "height": 1254
+      }
+    },
+    {
+      "asset": "/brand/lolixco-wordmark-reference.png",
+      "bytes": 327061,
+      "status": 200,
+      "type": "image/png",
+      "decoded": {
+        "width": 2172,
+        "height": 724
+      }
+    }
+  ],
+  "failed": [
+    {
+      "url": "http://127.0.0.1:5173/media/motion-study.webm",
+      "error": "net::ERR_ABORTED"
+    }
+  ]
+}

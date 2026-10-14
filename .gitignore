@@ -1,3 +1,8 @@
+node_modules/
+dist/
+*.local
+
+# Existing upstream repository ignore rules (preserved)
 # Logs
 logs
 *.log
@@ -147,3 +152,6 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Local asset verification build
+.verification-dist/

@@ -1,0 +1,41 @@
+{
+  "viewports": [
+    {
+      "width": 1672,
+      "height": 941,
+      "overflow": false
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "overflow": false
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "overflow": false
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "overflow": false
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "overflow": false
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "overflow": false
+    },
+    {
+      "width": 360,
+      "height": 800,
+      "overflow": false
+    }
+  ],
+  "interactions": "passed",
+  "pageErrors": []
+}
