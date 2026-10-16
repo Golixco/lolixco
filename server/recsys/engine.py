@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .catalog import Catalog
 from .similarity import (
+    BOILERPLATE_TAGS,
     category_match_score,
     compute_session_history_affinity,
     compute_tag_idf,
@@ -115,7 +116,6 @@ class RecommendationEngine:
         ranked_items, cap_relaxed, relaxation_warnings = self._apply_creator_cap(
             ranked_items, max_per_window=2, window_size=10
         )
-        warnings.extend(relaxation_warnings)
 
         # 6. Apply limit and wrap in RecommendedItem with 1-based ranks
         limited_items = ranked_items[: request.limit]
@@ -129,6 +129,25 @@ class RecommendationEngine:
             for idx, (item, score, reasons) in enumerate(limited_items)
         )
 
+        # 7. Evaluate whether the delivered feed required relaxation
+        # Under the complete 10-item sliding-window policy, a sequence of length < 10
+        # has no complete window and therefore 0 violating windows.
+        if len(final_items) < 10:
+            actual_cap_relaxed = False
+            actual_relaxation_warnings: List[str] = []
+        else:
+            is_valid, _ = verify_sliding_window_diversity(
+                final_items, max_per_window=2, window_size=10
+            )
+            if is_valid:
+                actual_cap_relaxed = False
+                actual_relaxation_warnings = []
+            else:
+                actual_cap_relaxed = True
+                actual_relaxation_warnings = relaxation_warnings
+
+        warnings.extend(actual_relaxation_warnings)
+
         return RecommendationResponse(
             surface=request.surface,
             mode_used="baseline",
@@ -139,7 +158,7 @@ class RecommendationEngine:
             diagnostics={
                 "fallback_reason": None,
                 "warnings": sorted(list(set(warnings))),
-                "creator_cap_relaxed": cap_relaxed,
+                "creator_cap_relaxed": actual_cap_relaxed,
             },
         )
 
@@ -237,10 +256,16 @@ class RecommendationEngine:
             meaningful_shared = get_meaningful_shared_tags(
                 item.tags, current_edit.tags, self.catalog
             )
+            has_informative_shared = bool(
+                {t.lower().strip() for t in item.tags if t.strip()}
+                & {t.lower().strip() for t in current_edit.tags if t.strip()}
+                - BOILERPLATE_TAGS
+            )
+
             if meaningful_shared and tag_score > 0.10:
                 reasons.append("tag_similarity")
-            elif tag_score > 0.05:
-                # Broad non-distinctive tag overlap
+            elif has_informative_shared and tag_score > 0.05:
+                # Broad non-distinctive tag overlap (must still be informative, non-boilerplate)
                 reasons.append("thematic_relation")
 
             if hist_score > 0.10:
@@ -273,6 +298,9 @@ class RecommendationEngine:
         """
         if not ranked:
             return [], False, []
+
+        if len(ranked) < window_size:
+            return ranked, False, []
 
         unique_creators = {candidate[0].creator for candidate in ranked}
         warnings: List[str] = []

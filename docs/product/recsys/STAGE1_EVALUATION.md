@@ -17,13 +17,14 @@ In adherence to the core engineering directive — **"Never fabricate engagement
 
 ## 2. What Can Be Measured With the Present Catalog
 
-All properties below are verified via 31 deterministic unit and integration tests in `server/recsys/tests/`:
+All properties below are verified via 34 deterministic unit and integration tests in `server/recsys/tests/`:
 
 | Dimension / Metric | Measured Value | Verification Method | Status |
 | :--- | :--- | :--- | :--- |
 | **Catalog ID Integrity** | 17 / 17 edits preserved (100%) | `test_catalog.py` | **VERIFIED** |
 | **ID 0 Preservation** | Retained with `title: "Into the Light"` | `test_catalog.py` | **VERIFIED** |
 | **Strict Schema Typing** | Bools as IDs, string tags, string trending, missing durations rejected | `test_catalog.py` | **VERIFIED** |
+| **Strict Catalog Lookup IDs**| `Catalog.get()` and `__contains__()` reject booleans (`True`/`False`), preserving ID 0/1 | `test_catalog.py` | **VERIFIED** |
 | **Strict Envelope Loading** | List root, wrong version, extra keys, and count mismatches rejected | `test_catalog.py` | **VERIFIED** |
 | **Canonical Category Contract** | Rejects unknown category filters; handles zero-result valid filters cleanly | `test_catalog.py`, `test_engine.py` | **VERIFIED** |
 | **Duration Parsing Fidelity** | `0:12` $\rightarrow 12,000\,\text{ms}$ (12.0s); negative durations rejected | `test_catalog.py` | **VERIFIED** |
@@ -31,14 +32,16 @@ All properties below are verified via 31 deterministic unit and integration test
 | **Usable History Detection** | Skips (<2s) and unknown IDs filtered; cold start preserved | `test_engine.py` | **VERIFIED** |
 | **Honest Reason Telemetry** | No `category_balance` in history Home; `fallback_exploration` in Up Next | `test_engine.py` | **VERIFIED** |
 | **Active Video Suppression** | 0% recurrence of active video in Up Next | `test_engine.py` | **VERIFIED** |
+| **Generic-Tag-Only Similarity**| Boilerplate-only overlap yields strictly 0.0; no false `thematic_relation` | `test_engine.py`, `test_similarity.py` | **VERIFIED** |
 | **Meaningful Tag Discrimination** | Generic tags do not emit `tag_similarity`; topic tags do | `test_engine.py`, `test_similarity.py` | **VERIFIED** |
 | **Adversarial Diversity Feasibility**| Solves adversarial `DDACBEECEABDABC` permutation with 0 window violations | `test_engine.py` (`verify_sliding_window_diversity`) | **VERIFIED** |
+| **Feed-Length Diversity Diagnostics**| Short (<10) feeds emit no false relaxation; long single-creator feeds flag relaxation | `test_engine.py` | **VERIFIED** |
 | **Infeasibility vs Budget Exhaustion**| Explicitly distinguishes proven mathematical infeasibility from step limit | `test_engine.py` | **VERIFIED** |
 | **Diversity Cap Relaxation** | Explicit warnings on 1-2 creators and pool exhaustion | `test_engine.py` | **VERIFIED** |
 | **Deterministic Tie-Breaking** | Identical scores break ties by `edit.id` ASC | `test_engine.py` | **VERIFIED** |
 | **Source-to-Snapshot Drift** | Positive sync passes; tampered count, version, & fields fail | `test_drift.py` (positive & negative tests) | **VERIFIED** |
 | **Strict Drift Type Resistance**| Rejects `trending: 0` vs `false` and `total_edits: 17.0` vs `17` | `test_drift.py` (type bypass tests) | **VERIFIED** |
-| **Execution Performance** | 31 unit tests execute in ~5.5 seconds | `python3 -m unittest` | **VERIFIED** |
+| **Execution Performance** | 34 unit tests execute in ~6.1 seconds | `python3 -m unittest` | **VERIFIED** |
 
 ---
 
@@ -52,9 +55,11 @@ Independent mathematical verification establishes:
    - For $N = 4$: Maximum 8 items.
    - For $N \ge 5$: $2 \times 5 = 10$ items.
    Therefore, strict enforcement across a 10-item window mathematically requires **at least 5 distinct creators**.
-2. **Adversarial Test Results:**
+2. **Feed Length & Sliding Window Policy:**
+   Under the complete 10-item sliding-window policy, sequences with length $< 10$ (such as 1-edit feeds, short feeds, or filtered sub-feeds) contain zero complete 10-item windows. They require no relaxation and emit `creator_cap_relaxed: False` with zero warnings.
+3. **Adversarial Test Results:**
    - **Adversarial Permutation `DDACBEECEABDABC` (5 creators, 3 items each):** The bounded backtracking scheduler overcomes greedy local starvation to produce `DACBEDECABDACBE`. Every 10-item sliding window $[i : i + 10]$ satisfies $\le 2$ items per creator. No relaxation is triggered (`creator_cap_relaxed == False`).
-   - **1 Creator (Demo Catalog):** Automatically relaxes cap, emits `creator_cap_relaxed: true` and `"creator_cap_relaxed"`, preserves all 17 demo items without truncation.
+   - **1 Creator (Demo Catalog, $\ge 10$ items):** When delivering $\ge 10$ items, automatically relaxes cap, emits `creator_cap_relaxed: true` and `"creator_cap_relaxed_proven_infeasible"`, preserving all items without truncation. Short feeds (<10 items) emit no warnings.
    - **2 Creators:** Relaxes cap, emits diagnostic warning, avoids dropping eligible content.
    - **3 & 4 Creators:** Places items without concentration until window capacity saturates; detects mathematical impossibility, relaxes gracefully with `"creator_cap_relaxed_proven_infeasible"`, and retains all items.
    - **5 & 6 Creators (Balanced):** Strict enforcement succeeds across the entire returned list. `verify_sliding_window_diversity()` verifies **every complete sliding window** $[i : i + 10]$ has 0 violations.

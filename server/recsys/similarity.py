@@ -41,7 +41,7 @@ def compute_tag_idf(catalog: Catalog) -> Dict[str, float]:
     """
     Compute Inverse Document Frequency (IDF) for all unique tags in the catalog.
     IDF(t) = ln(1.0 + N / DF(t))
-    Boilerplate tags ('original', 'demo') receive a fixed near-zero weight (0.01)
+    Boilerplate tags ('original', 'demo') receive a fixed zero weight (0.0)
     to completely prevent boilerplate overlap from inflating similarity scores.
     """
     n = len(catalog)
@@ -52,7 +52,7 @@ def compute_tag_idf(catalog: Catalog) -> Dict[str, float]:
             tag_clean = tag.lower().strip()
             if tag_clean and tag_clean not in idf_table:
                 if tag_clean in BOILERPLATE_TAGS:
-                    idf_table[tag_clean] = 0.01
+                    idf_table[tag_clean] = 0.0
                 else:
                     df = catalog.get_tag_doc_freq(tag_clean)
                     idf_table[tag_clean] = math.log(1.0 + (n / max(df, 1)))
@@ -70,6 +70,8 @@ def tag_idf_similarity(
     Weighted Jaccard similarity using tag IDF weights:
     Sim(A, B) = sum_{t in A n B} IDF(t) / sum_{t in A u B} IDF(t)
     Returns a score strictly in [0.0, 1.0].
+    Boilerplate tags ('original', 'demo') are filtered out so that boilerplate-only
+    overlap has zero thematic similarity regardless of how many other tags exist.
     """
     set_a = {t.lower().strip() for t in tags_a if t.strip()}
     set_b = {t.lower().strip() for t in tags_b if t.strip()}
@@ -77,14 +79,22 @@ def tag_idf_similarity(
     if not set_a and not set_b:
         return 0.0
 
-    union_tags = set_a | set_b
     intersection_tags = set_a & set_b
-
     if not intersection_tags:
         return 0.0
 
-    intersection_weight = sum(idf_table.get(t, default_idf) for t in intersection_tags)
-    union_weight = sum(idf_table.get(t, default_idf) for t in union_tags)
+    # Only informative (non-boilerplate) tags contribute to similarity
+    informative_intersection = {t for t in intersection_tags if t not in BOILERPLATE_TAGS}
+    if not informative_intersection:
+        return 0.0
+
+    union_tags = set_a | set_b
+    informative_union = {t for t in union_tags if t not in BOILERPLATE_TAGS}
+    if not informative_union:
+        return 0.0
+
+    intersection_weight = sum(idf_table.get(t, default_idf) for t in informative_intersection)
+    union_weight = sum(idf_table.get(t, default_idf) for t in informative_union)
 
     if union_weight <= 0.0:
         return 0.0

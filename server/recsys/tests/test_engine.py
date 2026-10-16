@@ -129,8 +129,56 @@ class TestRecommendationEngine(unittest.TestCase):
         self.assertNotIn("tag_similarity", item_4.reason_codes)
 
         # Same for Gaming edit 1 which only shares "original" and "demo"
+        # Must emit neither tag_similarity nor thematic_relation!
         item_1 = next(i for i in resp.items if i.edit.id == 1)
         self.assertNotIn("tag_similarity", item_1.reason_codes)
+        self.assertNotIn("thematic_relation", item_1.reason_codes)
+        self.assertIn("fallback_exploration", item_1.reason_codes)
+        self.assertEqual(item_1.score, 0.0)
+
+        # Independent reproduction test:
+        # Current edit: Cinematic, tags "original", "demo"
+        # Candidate edit: Gaming, tags "original", "demo"
+        edit_cinematic = EditItem(
+            id=101,
+            title="Cinematic Boilerplate",
+            category="Cinematic",
+            tags=("original", "demo"),
+            description="Boilerplate only",
+            creator="CreatorA",
+            poster="/p.svg",
+            source="/s.webm",
+            duration="0:10",
+            duration_ms=10000,
+            duration_sec=10.0,
+            trending=False,
+        )
+        edit_gaming = EditItem(
+            id=102,
+            title="Gaming Boilerplate",
+            category="Gaming",
+            tags=("original", "demo"),
+            description="Boilerplate only",
+            creator="CreatorB",
+            poster="/p.svg",
+            source="/s.webm",
+            duration="0:10",
+            duration_ms=10000,
+            duration_sec=10.0,
+            trending=False,
+        )
+        bp_catalog = Catalog([edit_cinematic, edit_gaming])
+        bp_engine = RecommendationEngine(bp_catalog)
+        bp_resp = bp_engine.recommend(
+            RecommendationRequest(surface="up_next", current_edit_id=101, limit=5)
+        )
+        self.assertEqual(len(bp_resp.items), 1)
+        bp_rec = bp_resp.items[0]
+        self.assertEqual(bp_rec.edit.id, 102)
+        self.assertEqual(bp_rec.score, 0.0, "Boilerplate-only candidate must have score 0.0")
+        self.assertNotIn("thematic_relation", bp_rec.reason_codes)
+        self.assertNotIn("tag_similarity", bp_rec.reason_codes)
+        self.assertIn("fallback_exploration", bp_rec.reason_codes)
 
     def test_creator_diversity_reranker_adversarial_1_to_6_creators(self):
         # 1. Single Creator (1-creator demo catalog):
@@ -376,6 +424,60 @@ class TestRecommendationEngine(unittest.TestCase):
         self.assertEqual(upnext_item.edit.id, 99)
         self.assertNotIn("thematic_relation", upnext_item.reason_codes)
         self.assertIn("fallback_exploration", upnext_item.reason_codes)
+
+    def test_creator_diversity_relaxation_diagnostics_edge_cases(self):
+        """
+        Verify that creator-diversity relaxation diagnostics accurately represent
+        actual required relaxation under the complete 10-item sliding-window policy:
+        1. One-item catalog feed: length 1 < 10, no complete window exists -> no relaxation.
+        2. Short feeds: limit < 10 on single-creator demo catalog -> no relaxation.
+        3. Filtered feeds: e.g. Cinematic category (3 items) -> no relaxation.
+        4. Long single-creator feeds: length >= 10 items from 1 creator -> genuine relaxation.
+        5. Five-creator backtracking case: 15 items, 5 creators -> feasible without relaxation.
+        """
+        # 1. One-item catalog
+        single_item = make_test_item(0, "SoloCreator")
+        cat_1 = Catalog([single_item])
+        eng_1 = RecommendationEngine(cat_1)
+        resp_1 = eng_1.recommend(RecommendationRequest(surface="home", limit=10))
+
+        self.assertEqual(len(resp_1.items), 1)
+        self.assertFalse(
+            resp_1.diagnostics.get("creator_cap_relaxed"),
+            "1-item feed has no 10-item window and must not flag cap relaxed",
+        )
+        self.assertNotIn("creator_cap_relaxed", resp_1.diagnostics.get("warnings", []))
+        self.assertNotIn("creator_cap_relaxed_proven_infeasible", resp_1.diagnostics.get("warnings", []))
+
+        # Direct test on _apply_creator_cap with 1 item:
+        direct_items, relaxed_direct, warnings_direct = eng_1._apply_creator_cap(
+            [(single_item, 1.0, ("test",))]
+        )
+        self.assertFalse(relaxed_direct)
+        self.assertEqual(warnings_direct, [])
+
+        # 2. Short feed on demo catalog (limit=3 < 10)
+        resp_short = self.engine.recommend(RecommendationRequest(surface="home", limit=3))
+        self.assertEqual(len(resp_short.items), 3)
+        self.assertFalse(resp_short.diagnostics.get("creator_cap_relaxed"))
+        self.assertNotIn("creator_cap_relaxed", resp_short.diagnostics.get("warnings", []))
+        self.assertNotIn("creator_cap_relaxed_proven_infeasible", resp_short.diagnostics.get("warnings", []))
+
+        # 3. Filtered feed resulting in < 10 items (Cinematic has 3 items in demo catalog)
+        resp_filt = self.engine.recommend(
+            RecommendationRequest(surface="home", category_filter="Cinematic", limit=10)
+        )
+        self.assertEqual(len(resp_filt.items), 3)
+        self.assertFalse(resp_filt.diagnostics.get("creator_cap_relaxed"))
+        self.assertNotIn("creator_cap_relaxed", resp_filt.diagnostics.get("warnings", []))
+        self.assertNotIn("creator_cap_relaxed_proven_infeasible", resp_filt.diagnostics.get("warnings", []))
+
+        # 4. Long single-creator feed (limit=12 >= 10 on demo catalog, all 17 items from 'Lolixco demo')
+        resp_long = self.engine.recommend(RecommendationRequest(surface="home", limit=12))
+        self.assertEqual(len(resp_long.items), 12)
+        self.assertTrue(resp_long.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed", resp_long.diagnostics.get("warnings", []))
+        self.assertIn("creator_cap_relaxed_proven_infeasible", resp_long.diagnostics.get("warnings", []))
 
 
 if __name__ == "__main__":

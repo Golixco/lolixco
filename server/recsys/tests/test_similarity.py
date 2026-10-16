@@ -26,9 +26,9 @@ class TestSimilarity(unittest.TestCase):
         idf_cinematic = self.idf_table["cinematic"]
         idf_neon = self.idf_table["neon"]
 
-        # Boilerplate tags receive minimal weight (0.01)
-        self.assertAlmostEqual(idf_demo, 0.01)
-        self.assertAlmostEqual(idf_original, 0.01)
+        # Boilerplate tags receive fixed zero weight (0.0)
+        self.assertEqual(idf_demo, 0.0)
+        self.assertEqual(idf_original, 0.0)
 
         # Non-boilerplate tags receive true IDF values
         self.assertGreater(idf_cinematic, 1.0)
@@ -60,8 +60,64 @@ class TestSimilarity(unittest.TestCase):
         )
 
         self.assertGreater(sim_same_topic, 0.95)
-        # Because boilerplate tags are discounted to 0.01, cross-topic similarity with only boilerplate is ~0.0
-        self.assertLess(sim_cross_topic, 0.05)
+        # Because boilerplate tags are zero-weighted and filtered, cross-topic similarity with only boilerplate is strictly 0.0
+        self.assertEqual(sim_cross_topic, 0.0)
+
+    def test_adversarial_boilerplate_only_mixed_and_distinctive_tag_sets(self):
+        """
+        Adversarial regression test:
+        1. Boilerplate-only overlap produces strictly 0.0 similarity.
+        2. Boilerplate overlap with non-matching tags produces strictly 0.0 similarity.
+        3. Mixed sets with genuine informative overlap are preserved.
+        4. Identical distinctive sets yield 1.0.
+        """
+        # Case 1: Both edits contain ONLY boilerplate tags (reproduction case from review)
+        tags_boilerplate_only_a = ["original", "demo"]
+        tags_boilerplate_only_b = ["original", "demo"]
+        sim_boilerplate_only = tag_idf_similarity(
+            tags_boilerplate_only_a, tags_boilerplate_only_b, self.idf_table
+        )
+        self.assertEqual(
+            sim_boilerplate_only,
+            0.0,
+            "Boilerplate-only overlap must yield 0.0 similarity, not 1.0",
+        )
+
+        # Case 2: Boilerplate overlap with other non-matching tags
+        tags_disjoint_with_boilerplate_a = ["original", "demo", "cinematic", "film"]
+        tags_disjoint_with_boilerplate_b = ["original", "demo", "gaming", "neon"]
+        sim_disjoint_with_bp = tag_idf_similarity(
+            tags_disjoint_with_boilerplate_a,
+            tags_disjoint_with_boilerplate_b,
+            self.idf_table,
+        )
+        self.assertEqual(
+            sim_disjoint_with_bp,
+            0.0,
+            "Disjoint tags with boilerplate overlap must yield 0.0 similarity",
+        )
+
+        # Case 3: Mixed tags with genuine informative overlap
+        tags_mixed_a = ["original", "demo", "phonk", "drift"]
+        tags_mixed_b = ["original", "demo", "phonk", "bass"]
+        sim_mixed = tag_idf_similarity(tags_mixed_a, tags_mixed_b, self.idf_table)
+        self.assertGreater(sim_mixed, 0.0)
+        # Verify the calculation equals exactly IDF("phonk") / (IDF("phonk") + IDF("drift") + IDF("bass"))
+        expected_intersection = self.idf_table.get("phonk", 1.0)
+        expected_union = (
+            self.idf_table.get("phonk", 1.0)
+            + self.idf_table.get("drift", 1.0)
+            + self.idf_table.get("bass", 1.0)
+        )
+        self.assertAlmostEqual(sim_mixed, expected_intersection / expected_union)
+
+        # Case 4: Genuinely distinctive tag sets with 100% overlap
+        tags_distinctive_a = ["phonk", "drift"]
+        tags_distinctive_b = ["phonk", "drift"]
+        sim_distinctive = tag_idf_similarity(
+            tags_distinctive_a, tags_distinctive_b, self.idf_table
+        )
+        self.assertEqual(sim_distinctive, 1.0)
 
     def test_category_match_score(self):
         self.assertEqual(category_match_score("Cinematic", "Cinematic"), 1.0)

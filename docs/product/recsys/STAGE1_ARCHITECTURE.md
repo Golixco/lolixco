@@ -50,6 +50,7 @@ server/recsys/
 ### 3.1 Strict Type Constraints
 In Python, `isinstance(True, int)` evaluates to `True`, and `17.0 == 17` evaluates to `True`. To prevent type corruption:
 - `EditItem.id`: Validated with `type(id) is int and id >= 0`.
+- `Catalog.get()` and `Catalog.__contains__()`: Strictly reject boolean IDs (`True`/`False`), raising `TypeError` so they can never alias Edit ID 1 or Edit ID 0. Valid non-negative integer IDs (including ID 0) are strictly preserved.
 - `EditItem.tags`: Must be a `list` or `tuple` of non-empty strings. Bare strings (e.g. `"gaming"`) are explicitly rejected to prevent character-by-character decomposition.
 - `EditItem.trending`: Must be a strict `bool` (`type is bool`). Numeric `0` or string `"false"` is strictly rejected.
 - `EditItem.duration`: Missing duration is strictly rejected. Defaulting missing durations to `"0:12"` is prohibited.
@@ -72,15 +73,16 @@ For a candidate edit $i$ given currently watched edit $c$ and validated usable h
    $$C(i, c) = \begin{cases} 1.0 & \text{if } i.\text{category} == c.\text{category} \\ 0.0 & \text{otherwise} \end{cases}$$
 
 3. **IDF-Weighted Tag Similarity $T_{\text{IDF}}(i, c)$ with Boilerplate Suppression:**
-   Boilerplate fixture tags (`original`, `demo`) that appear across the catalog receive a fixed minimal weight ($0.01$). Informative topic tags receive full logarithmic IDF weight:
+   Boilerplate fixture tags (`original`, `demo`) that appear across the catalog receive a fixed zero weight ($0.0$) and are excluded from numerator and denominator calculations. Informative topic tags receive full logarithmic IDF weight:
    $$\text{IDF}(t) = \ln\left(1 + \frac{N}{\text{DF}(t)}\right)$$
-   Weighted similarity is computed across non-boilerplate tags:
-   $$T_{\text{IDF}}(i, c) = \frac{\sum_{t \in i.\text{tags} \cap c.\text{tags}} \text{IDF}(t)}{\sum_{t \in i.\text{tags} \cup c.\text{tags}} \text{IDF}(t)}$$
+   Weighted similarity is computed strictly across informative (non-boilerplate) tags:
+   $$T_{\text{IDF}}(i, c) = \frac{\sum_{t \in (i.\text{tags} \cap c.\text{tags}) \setminus \text{Boilerplate}} \text{IDF}(t)}{\sum_{t \in (i.\text{tags} \cup c.\text{tags}) \setminus \text{Boilerplate}} \text{IDF}(t)}$$
+   Edits that overlap solely on boilerplate metadata receive strictly $0.0$ similarity, preventing generic metadata from inflating recommendation scores or generating unearned thematic connections.
 
 4. **Honest Up Next Explanation Reason Codes:**
    - `category_match`: Emitted when $C(i, c) > 0$.
    - `tag_similarity`: Emitted ONLY when distinctive non-boilerplate topic tags overlap.
-   - `thematic_relation`: Emitted when non-distinctive tags overlap ($T_{\text{IDF}} > 0.05$).
+   - `thematic_relation`: Emitted when non-distinctive informative tags overlap ($T_{\text{IDF}} > 0.05$ and at least one non-boilerplate tag is shared). Never emitted based solely on boilerplate metadata.
    - `session_continuity`: Emitted when session history affinity $> 0.10$.
    - `fallback_exploration`: Emitted when an eligible item has zero category match, no tag overlap, and no history affinity. The engine never emits `thematic_relation` when no thematic similarity exists.
 
@@ -108,21 +110,23 @@ For a candidate edit $i$ given currently watched edit $c$ and validated usable h
 
 ### 4.3 Creator Diversity Policy & Bounded Backtracking Scheduler
 
-- **Policy:** In any sliding window of length 10 in the returned list, no single creator may appear more than 2 times.
+- **Policy:** In any sliding window of length 10 in the returned list, no single creator may appear more than 2 times. Under the complete 10-item sliding-window definition, feeds shorter than 10 items (such as a 1-item catalog, short feeds, or filtered sub-feeds) contain zero 10-item windows and therefore have zero violations and require no relaxation.
 - **Mathematical Feasibility:**
    By the Pigeonhole Principle, to satisfy $\le 2$ items per creator in a window of size 10, the candidate pool must contain at least:
    $$N_{\text{creators}} \ge \lceil 10 / 2 \rceil = 5 \text{ distinct creators}$$
    With 1, 2, 3, or 4 creators, strict enforcement across a 10-item window is mathematically impossible once the window capacity ($2 \times N_{\text{creators}}$) is reached.
 - **Two-Stage Deterministic Scheduler:**
-  1. **Greedy Fast-Path:** Attempts greedy placement preserving primary ranking. If zero sliding-window violations occur, returns the optimal result immediately ($O(N^2)$).
-  2. **Bounded Backtracking with State Memoization:** If greedy encounters a dead-end on adversarial permutations (e.g. `DDACBEECEABDABC`), the engine executes depth-first search over creator placement choices with memoization over `(recent_window_creators, remaining_creator_counts)`. Bounded by a step budget ($50,000$ steps).
-  3. **Feasible Completion:** Guarantees enforcement whenever a valid complete ordering exists, preserving item identities and relative primary rank within each creator.
-  4. **Explicit Reason Codes on Relaxation:**
-     - Insufficient creators ($N \le 2$): `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_proven_infeasible"`.
+  1. **Short Feed Fast-Path:** If the ranked list is shorter than 10 items, no complete 10-item window exists to violate the cap; returns `(ranked, False, [])`.
+  2. **Greedy Fast-Path:** Attempts greedy placement preserving primary ranking. If zero sliding-window violations occur, returns the optimal result immediately ($O(N^2)$).
+  3. **Bounded Backtracking with State Memoization:** If greedy encounters a dead-end on adversarial permutations (e.g. `DDACBEECEABDABC`), the engine executes depth-first search over creator placement choices with memoization over `(recent_window_creators, remaining_creator_counts)`. Bounded by a step budget ($50,000$ steps).
+  4. **Feasible Completion:** Guarantees enforcement whenever a valid complete ordering exists, preserving item identities and relative primary rank within each creator.
+  5. **Accurate Feed Diagnostics on Relaxation:**
+     - Feeds shorter than 10 items require no relaxation and emit `creator_cap_relaxed: False` with no warnings.
+     - Feeds $\ge 10$ items with insufficient creators ($N \le 2$, such as long single-creator feeds): `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_proven_infeasible"`.
      - Proven infeasible ($N \in \{3, 4\}$ or skewed inventory): `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_proven_infeasible"`.
      - Search budget exhausted: `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_search_budget_exhausted"`.
      - In all relaxed cases, remaining candidates are placed to minimize creator concentration without dropping content.
-  5. **Verification:** `verify_sliding_window_diversity()` inspects every complete sliding window $[i : i + 10]$ in the returned list.
+  6. **Verification:** `verify_sliding_window_diversity()` inspects every complete sliding window $[i : i + 10]$ in the returned list.
 
 ---
 

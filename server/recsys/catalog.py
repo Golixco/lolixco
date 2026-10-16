@@ -87,13 +87,17 @@ class Catalog:
         return len(self._items_by_id)
 
     def __contains__(self, edit_id: Any) -> bool:
-        if not isinstance(edit_id, int):
+        if isinstance(edit_id, bool) or type(edit_id) is bool:
+            raise TypeError(f"Catalog edit_id must be strict integer, got bool: {edit_id!r}")
+        if type(edit_id) is not int:
             return False
         return edit_id in self._items_by_id
 
-    def get(self, edit_id: int) -> Optional[EditItem]:
+    def get(self, edit_id: Any) -> Optional[EditItem]:
         """Safely fetch an edit by ID. Preserves ID 0."""
-        if not isinstance(edit_id, int):
+        if isinstance(edit_id, bool) or type(edit_id) is bool:
+            raise TypeError(f"Catalog edit_id must be strict integer, got bool: {edit_id!r}")
+        if type(edit_id) is not int:
             return None
         return self._items_by_id.get(edit_id)
 

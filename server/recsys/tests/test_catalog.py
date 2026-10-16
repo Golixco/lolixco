@@ -330,7 +330,47 @@ class TestCatalogValidation(unittest.TestCase):
         finally:
             Path(temp_path).unlink()
 
+    def test_strict_catalog_lookup_ids(self):
+        """
+        Verify Catalog.get() and Catalog.__contains__() strictly reject boolean IDs.
+        True must not alias Edit ID 1, False must not alias Edit ID 0.
+        Preserve ordinary integer IDs, including valid ID 0.
+        """
+        snapshot_path = Path(__file__).resolve().parents[1] / "catalog_snapshot.json"
+        catalog = load_catalog_from_json(snapshot_path)
+
+        # 1. Ordinary valid integer IDs are preserved
+        self.assertIn(0, catalog)
+        self.assertIn(1, catalog)
+        item_0 = catalog.get(0)
+        item_1 = catalog.get(1)
+        self.assertIsNotNone(item_0)
+        self.assertIsNotNone(item_1)
+        self.assertEqual(item_0.id, 0)
+        self.assertEqual(item_1.id, 1)
+
+        # 2. Non-existent integers and non-integer types return False / None
+        self.assertNotIn(999, catalog)
+        self.assertIsNone(catalog.get(999))
+        self.assertNotIn("0", catalog)
+        self.assertIsNone(catalog.get("0"))
+
+        # 3. Boolean True and False must be explicitly rejected (raise TypeError)
+        # and must NEVER alias Edit ID 1 or Edit ID 0
+        with self.assertRaises(TypeError):
+            _ = True in catalog
+
+        with self.assertRaises(TypeError):
+            _ = False in catalog
+
+        with self.assertRaises(TypeError):
+            catalog.get(True)
+
+        with self.assertRaises(TypeError):
+            catalog.get(False)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
