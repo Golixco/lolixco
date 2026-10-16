@@ -1,0 +1,295 @@
+{
+  "catalog_version": "demo-catalog-v1",
+  "total_edits": 17,
+  "edits": [
+    {
+      "id": 0,
+      "title": "Into the Light",
+      "category": "Cinematic",
+      "tags": [
+        "cinematic",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-0.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 1,
+      "title": "Echoes of Tomorrow",
+      "category": "Gaming",
+      "tags": [
+        "gaming",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-1.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 2,
+      "title": "Fragments",
+      "category": "Anime",
+      "tags": [
+        "anime",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-2.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 3,
+      "title": "Red Horizon",
+      "category": "Movies",
+      "tags": [
+        "movies",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-3.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 4,
+      "title": "Silent World",
+      "category": "Series",
+      "tags": [
+        "series",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-4.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 5,
+      "title": "Neon Soul",
+      "category": "Phonk",
+      "tags": [
+        "phonk",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-5.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 6,
+      "title": "Broken Crowns",
+      "category": "Cinematic",
+      "tags": [
+        "cinematic",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-6.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 7,
+      "title": "Liminal",
+      "category": "Gaming",
+      "tags": [
+        "gaming",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-7.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 8,
+      "title": "Darkest Days",
+      "category": "Anime",
+      "tags": [
+        "anime",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-8.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 9,
+      "title": "Reflections",
+      "category": "Movies",
+      "tags": [
+        "movies",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-9.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 10,
+      "title": "Chasing Heaven",
+      "category": "Series",
+      "tags": [
+        "series",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-10.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": false
+    },
+    {
+      "id": 11,
+      "title": "Afterglow",
+      "category": "Phonk",
+      "tags": [
+        "phonk",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-11.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": true
+    },
+    {
+      "id": 12,
+      "title": "Cold Hearts",
+      "category": "Cinematic",
+      "tags": [
+        "cinematic",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-12.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": true
+    },
+    {
+      "id": 13,
+      "title": "Parallel",
+      "category": "Gaming",
+      "tags": [
+        "gaming",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-13.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": true
+    },
+    {
+      "id": 14,
+      "title": "Lost Signal",
+      "category": "Anime",
+      "tags": [
+        "anime",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-14.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": true
+    },
+    {
+      "id": 15,
+      "title": "Radiant",
+      "category": "Movies",
+      "tags": [
+        "movies",
+        "original",
+        "demo",
+        "neon"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-15.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": true
+    },
+    {
+      "id": 16,
+      "title": "Midnight City",
+      "category": "Series",
+      "tags": [
+        "series",
+        "original",
+        "demo",
+        "landscape"
+      ],
+      "description": "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
+      "creator": "Lolixco demo",
+      "poster": "/media/art-16.svg",
+      "source": "/media/motion-study.webm",
+      "duration": "0:12",
+      "trending": true
+    }
+  ]
+}
