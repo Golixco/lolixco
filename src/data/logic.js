@@ -21,8 +21,16 @@ export function matches(edit, query, category) {
 
   const passesQuery = terms.every((term) => {
     if (term.startsWith("#")) {
-      const clean = term.replace(/^#+/, "");
-      return !!clean && edit.tags.some((t) => t.toLowerCase() === clean);
+      // Reject malformed prefixes such as ##anime, #, ##
+      if (
+        term.startsWith("##") ||
+        term.length === 1 ||
+        !/^#[a-zA-Z0-9_\-]+$/.test(term)
+      ) {
+        return false;
+      }
+      const clean = term.slice(1).toLowerCase();
+      return edit.tags.some((t) => t.toLowerCase() === clean);
     }
     return text.includes(term);
   });

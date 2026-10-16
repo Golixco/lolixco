@@ -20,8 +20,9 @@ export interface DiscoveryFeedState {
  * Hook managing discovery feed filtering and search ranking.
  *
  * Guarantees:
- * - Production local search is synchronous: zero artificial latency or skeleton flicker.
- * - Out-of-order protection: stale asynchronous responses never overwrite newer queries.
+ * - Production local search is synchronous: zero artificial latency, zero skeleton flicker,
+ *   and instant updates without stale intermediate renders.
+ * - Out-of-order protection: stale asynchronous responses never overwrite newer queries when simulated.
  */
 export function useDiscoveryFeed(
   allEdits: Edit[],
@@ -32,39 +33,51 @@ export function useDiscoveryFeed(
   const { simulateDelayMs = 0 } = options;
   const requestIdRef = useRef(0);
 
-  // Synchronous initial state
+  // Synchronous memoized results derived directly in the render pass
   const syncResults = useMemo(() => {
     return searchEdits(allEdits, query, category);
   }, [allEdits, query, category]);
 
-  const [state, setState] = useState<DiscoveryFeedState>(() => ({
+  const syncEdits = useMemo(() => {
+    return syncResults.map((r) => r.edit);
+  }, [syncResults]);
+
+  // Asynchronous state used exclusively when simulateDelayMs > 0
+  const [asyncState, setAsyncState] = useState<{
+    searchResults: SearchResult[];
+    edits: Edit[];
+    loading: boolean;
+    query: string;
+    category: string;
+  }>(() => ({
     searchResults: syncResults,
-    edits: syncResults.map((r) => r.edit),
+    edits: syncEdits,
     loading: false,
+    query,
+    category,
   }));
 
   useEffect(() => {
-    // If no simulated delay (normal production behavior), update synchronously immediately
     if (!simulateDelayMs || simulateDelayMs <= 0) {
-      setState({
-        searchResults: syncResults,
-        edits: syncResults.map((r) => r.edit),
-        loading: false,
-      });
       return;
     }
 
-    // Isolated test / demonstration mode with simulated latency
     const currentRequestId = ++requestIdRef.current;
-    setState((prev) => ({ ...prev, loading: true }));
+    setAsyncState((prev) => ({
+      ...prev,
+      loading: true,
+      query,
+      category,
+    }));
 
     const timer = setTimeout(() => {
-      // Discard stale responses if a newer request was dispatched
       if (currentRequestId === requestIdRef.current) {
-        setState({
+        setAsyncState({
           searchResults: syncResults,
-          edits: syncResults.map((r) => r.edit),
+          edits: syncEdits,
           loading: false,
+          query,
+          category,
         });
       }
     }, simulateDelayMs);
@@ -72,7 +85,21 @@ export function useDiscoveryFeed(
     return () => {
       clearTimeout(timer);
     };
-  }, [syncResults, simulateDelayMs]);
+  }, [syncResults, syncEdits, simulateDelayMs, query, category]);
 
-  return state;
+  // Production synchronous mode: Return current memoized search results directly
+  if (!simulateDelayMs || simulateDelayMs <= 0) {
+    return {
+      searchResults: syncResults,
+      edits: syncEdits,
+      loading: false,
+    };
+  }
+
+  // Asynchronous simulation mode
+  return {
+    searchResults: asyncState.searchResults,
+    edits: asyncState.edits,
+    loading: asyncState.loading,
+  };
 }

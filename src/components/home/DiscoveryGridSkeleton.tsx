@@ -14,7 +14,7 @@ export function DiscoveryGridSkeleton({
       className="video-grid"
       role="status"
       aria-busy="true"
-      aria-label={label}
+      aria-live="polite"
     >
       <span className="sr-only">{label}</span>
       {Array.from({ length: count }).map((_, i) => (

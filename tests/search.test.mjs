@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { matches } from "../src/data/logic.js";
 import {
   searchEdits,
   getRankedEdits,
@@ -61,21 +62,34 @@ const sampleEdits = [
   },
 ];
 
-test("parseQuery correctly distinguishes hashtags, normal text, and bare hashes", () => {
-  const terms = parseQuery("neon #gaming ## # Blazing");
-  assert.equal(terms.length, 5);
-  assert.deepEqual(terms[0], { raw: "neon", clean: "neon", isHashtag: false });
-  assert.deepEqual(terms[1], { raw: "#gaming", clean: "gaming", isHashtag: true });
-  assert.deepEqual(terms[2], { raw: "##", clean: "", isHashtag: true });
-  assert.deepEqual(terms[3], { raw: "#", clean: "", isHashtag: true });
-  assert.deepEqual(terms[4], { raw: "Blazing", clean: "blazing", isHashtag: false });
+test("parseQuery correctly distinguishes hashtags, normal text, and bare/malformed hashes", () => {
+  const terms = parseQuery("neon #gaming ## # ##anime Blazing");
+  assert.equal(terms.length, 6);
+  assert.deepEqual(terms[0], { raw: "neon", clean: "neon", isHashtag: false, isMalformed: false });
+  assert.deepEqual(terms[1], { raw: "#gaming", clean: "gaming", isHashtag: true, isMalformed: false });
+  assert.deepEqual(terms[2], { raw: "##", clean: "", isHashtag: true, isMalformed: true });
+  assert.deepEqual(terms[3], { raw: "#", clean: "", isHashtag: true, isMalformed: true });
+  assert.deepEqual(terms[4], { raw: "##anime", clean: "", isHashtag: true, isMalformed: true });
+  assert.deepEqual(terms[5], { raw: "Blazing", clean: "blazing", isHashtag: false, isMalformed: false });
 });
 
-test("Bare and malformed hashtags safely return 0 results", () => {
+test("Bare and malformed hashtags safely return 0 results (rejecting repeated prefixes)", () => {
+  // Bare hashes
   assert.equal(searchEdits(sampleEdits, "#").length, 0);
   assert.equal(searchEdits(sampleEdits, "##").length, 0);
   assert.equal(searchEdits(sampleEdits, "   #   ").length, 0);
   assert.equal(searchEdits(sampleEdits, "neon #").length, 0);
+  
+  // Malformed repeated prefixes must be rejected, not stripped
+  assert.equal(searchEdits(sampleEdits, "##anime").length, 0);
+  assert.equal(searchEdits(sampleEdits, "##gaming").length, 0);
+  assert.equal(searchEdits(sampleEdits, "###neon").length, 0);
+  assert.equal(searchEdits(sampleEdits, "neon ##gaming").length, 0);
+  
+  // Logic.js matches() must also reject malformed hashtags
+  assert.equal(matches(sampleEdits[0], "##gaming", "Featured"), false);
+  assert.equal(matches(sampleEdits[0], "#", "Featured"), false);
+  assert.equal(matches(sampleEdits[0], "##", "Featured"), false);
 });
 
 test("Exact normalized tag matching for hashtag tokens", () => {
@@ -225,5 +239,43 @@ test("Production edits search against real dataset", async () => {
   // Edit 0 (Into the Light) is preserved
   assert.equal(edits[0].id, 0);
   assert.equal(edits[0].title, "Into the Light");
+});
+
+test("useDiscoveryFeed returns immediate synchronous results without stale intermediate renders", async () => {
+  const { useDiscoveryFeed } = await import("../src/hooks/useDiscoveryFeed.ts");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const React = (await import("react")).default;
+
+  let capturedEdits = [];
+  let capturedLoading = null;
+
+  function TestComponent({ query, category }) {
+    const { edits, loading } = useDiscoveryFeed(sampleEdits, query, category);
+    capturedEdits = edits;
+    capturedLoading = loading;
+    return React.createElement("div", null, edits.map((e) => e.title).join(","));
+  }
+
+  // 1. Initial render with empty query
+  renderToStaticMarkup(React.createElement(TestComponent, { query: "", category: "Featured" }));
+  assert.equal(capturedLoading, false);
+  assert.equal(capturedEdits.length, 4);
+
+  // 2. Render with hashtag query - must be immediate on that exact render pass
+  renderToStaticMarkup(React.createElement(TestComponent, { query: "#gaming", category: "Featured" }));
+  assert.equal(capturedLoading, false);
+  assert.equal(capturedEdits.length, 1);
+  assert.equal(capturedEdits[0].title, "Echoes of Tomorrow");
+
+  // 3. Render with category change - immediate on that render pass
+  renderToStaticMarkup(React.createElement(TestComponent, { query: "", category: "Trending" }));
+  assert.equal(capturedLoading, false);
+  assert.equal(capturedEdits.length, 2);
+  assert.ok(capturedEdits.every((e) => e.trending));
+
+  // 4. Render with malformed hashtag - immediate 0 results
+  renderToStaticMarkup(React.createElement(TestComponent, { query: "##anime", category: "Featured" }));
+  assert.equal(capturedLoading, false);
+  assert.equal(capturedEdits.length, 0);
 });
 

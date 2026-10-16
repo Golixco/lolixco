@@ -1,5 +1,31 @@
 import ts from 'typescript';
 import fs from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import path from 'node:path';
+
+export async function resolve(specifier, context, nextResolve) {
+  const { parentURL } = context;
+  if (parentURL && (specifier.startsWith('./') || specifier.startsWith('../'))) {
+    try {
+      const parentPath = fileURLToPath(parentURL);
+      const dir = path.dirname(parentPath);
+      const resolvedPath = path.resolve(dir, specifier);
+      const extensions = ['.tsx', '.ts', '.jsx', '.js'];
+      for (const ext of extensions) {
+        const candidate = resolvedPath + ext;
+        if (fs.existsSync(candidate)) {
+          return {
+            url: pathToFileURL(candidate).href,
+            shortCircuit: true
+          };
+        }
+      }
+    } catch {
+      // Fall through to nextResolve
+    }
+  }
+  return nextResolve(specifier, context);
+}
 
 export async function load(url, context, nextLoad) {
   if (url.endsWith('.ts') || url.endsWith('.tsx')) {

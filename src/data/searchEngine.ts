@@ -4,6 +4,7 @@ export interface ParsedTerm {
   raw: string;
   clean: string;
   isHashtag: boolean;
+  isMalformed?: boolean;
 }
 
 export interface SearchResult {
@@ -40,8 +41,17 @@ export const NON_HASHTAG_WEIGHTS = {
 } as const;
 
 /**
+ * Accepted hashtag syntax: exactly one leading '#', followed by alphanumeric characters,
+ * underscores, or hyphens (^[a-zA-Z0-9_\-]+$).
+ *
+ * Tokens with repeated leading hashes (e.g., '##anime', '##'), bare hashes ('#'),
+ * or empty content are marked as malformed and safely rejected.
+ */
+export const VALID_HASHTAG_REGEX = /^#[a-zA-Z0-9_\-]+$/;
+
+/**
  * Parse raw query string into structured terms.
- * Distinguishes hashtags (#tag) from normal text tokens.
+ * Distinguishes valid hashtags (#tag) from normal text tokens and malformed hashtags.
  */
 export function parseQuery(query: string): ParsedTerm[] {
   if (!query) return [];
@@ -50,11 +60,25 @@ export function parseQuery(query: string): ParsedTerm[] {
     .split(/\s+/)
     .filter(Boolean)
     .map((term) => {
-      const isHashtag = term.startsWith("#");
-      const clean = isHashtag
-        ? term.replace(/^#+/, "").toLowerCase()
-        : term.toLowerCase();
-      return { raw: term, clean, isHashtag };
+      if (term.startsWith("#")) {
+        const isMalformed =
+          term.startsWith("##") ||
+          term.length === 1 ||
+          !VALID_HASHTAG_REGEX.test(term);
+        const clean = isMalformed ? "" : term.slice(1).toLowerCase();
+        return {
+          raw: term,
+          clean,
+          isHashtag: true,
+          isMalformed,
+        };
+      }
+      return {
+        raw: term,
+        clean: term.toLowerCase(),
+        isHashtag: false,
+        isMalformed: false,
+      };
     });
 }
 
@@ -203,8 +227,8 @@ export function searchEdits(
     }));
   }
 
-  // If any term is a bare hashtag (e.g. "#", "##"), it cannot match any edit safely
-  if (terms.some((t) => t.isHashtag && !t.clean)) {
+  // If any term is a bare or malformed hashtag (e.g. "#", "##", "##anime"), it cannot match any edit safely
+  if (terms.some((t) => t.isHashtag && (t.isMalformed || !t.clean))) {
     return [];
   }
 

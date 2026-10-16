@@ -24,14 +24,25 @@ export default function Header({
   useEffect(() => {
     function handleGlobalKeyDown(e: KeyboardEvent) {
       if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Do not intercept if a modal dialog is currently active
+        const hasOpenDialog = !!document.querySelector("dialog[open], [role='dialog']");
+        if (hasOpenDialog) return;
+
         const activeEl = document.activeElement;
+
+        // Do not intercept if active focus is inside a dialog or modal
+        if (activeEl?.closest("dialog, [role='dialog']")) return;
+
+        // Do not intercept if active focus is inside the video player or its controls
+        if (activeEl?.closest(".player, .controls")) return;
+
         const isEditable =
           activeEl instanceof HTMLInputElement ||
           activeEl instanceof HTMLTextAreaElement ||
           activeEl instanceof HTMLSelectElement ||
           (activeEl instanceof HTMLElement && activeEl.isContentEditable);
 
-        // Do not intercept if focus is inside an editable field or active player controls
+        // Do not intercept if focus is inside an editable field or already in the search input
         if (!isEditable && inputRef.current && activeEl !== inputRef.current) {
           e.preventDefault();
           inputRef.current.focus();
