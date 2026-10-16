@@ -52,8 +52,8 @@ export const edits: Edit[] = titles.map((title, id) => ({
   description:
     "Original geometric artwork. Silent motion study for player testing; not finished creator footage.",
   creator: "Lolixco demo",
-  poster: assetUrl(mediaAssets.posters[id], import.meta.env.BASE_URL),
-  source: assetUrl(mediaAssets.video, import.meta.env.BASE_URL),
+  poster: assetUrl(mediaAssets.posters[id], import.meta.env?.BASE_URL ?? "/"),
+  source: assetUrl(mediaAssets.video, import.meta.env?.BASE_URL ?? "/"),
   duration: "0:12",
   trending: id > 10,
 }));

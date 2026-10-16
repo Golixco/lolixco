@@ -1,4 +1,14 @@
 export function matches(edit, query, category) {
+  const trimmed = (query || "").toLowerCase().trim();
+  const passesCategory =
+    ["Featured", "New"].includes(category) ||
+    (category === "Trending" ? edit.trending : edit.category === category);
+
+  if (!trimmed) {
+    return passesCategory;
+  }
+
+  const terms = trimmed.split(/\s+/).filter(Boolean);
   const text = [
     edit.title,
     edit.creator,
@@ -8,16 +18,18 @@ export function matches(edit, query, category) {
   ]
     .join(" ")
     .toLowerCase();
-  return (
-    query
-      .toLowerCase()
-      .trim()
-      .split(/\s+/)
-      .every((term) => text.includes(term)) &&
-    (["Featured", "New"].includes(category) ||
-      (category === "Trending" ? edit.trending : edit.category === category))
-  );
+
+  const passesQuery = terms.every((term) => {
+    if (term.startsWith("#")) {
+      const clean = term.replace(/^#+/, "");
+      return !!clean && edit.tags.some((t) => t.toLowerCase() === clean);
+    }
+    return text.includes(term);
+  });
+
+  return passesCategory && passesQuery;
 }
+
 export function validLoop(a, b, duration) {
   return (
     Number.isFinite(a) &&
@@ -27,6 +39,7 @@ export function validLoop(a, b, duration) {
     b - a >= 0.5
   );
 }
+
 export function loopSeek(time, a, b, enabled) {
   return enabled && a !== null && b !== null && (time >= b || time < a)
     ? a

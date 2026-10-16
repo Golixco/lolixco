@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import Header from "./components/layout/Header";
 import Sidebar from "./components/layout/Sidebar";
 import Dialog from "./components/ui/Dialog";
-import { CategoryBar, ContentSection, VideoCard } from "./components/home/Feed";
+import { CategoryBar, ContentSection, VideoCard, DiscoveryGridSkeleton } from "./components/home/Feed";
 import ImmersionBanner from "./components/home/ImmersionBanner";
 import VideoPlayer from "./components/video/VideoPlayer";
 import { edits, type Edit } from "./data/edits";
-import { matches } from "./data/logic.js";
+import { useDiscoveryFeed } from "./hooks/useDiscoveryFeed";
 export default function App() {
   const [expanded, setExpanded] = useState(() => innerWidth >= 1440),
     [mobile, setMobile] = useState(() => innerWidth < 768),
@@ -48,7 +48,7 @@ export default function App() {
       setModal("Sign In");
     else setModal(name);
   }
-  const filtered = edits.filter((e) => matches(e, query, category));
+  const { edits: filtered, loading } = useDiscoveryFeed(edits, query, category);
   const browsing = !!query || category !== "Featured" || active === "Explore";
   const auth = ["Sign In", "Sign Up"].includes(modal);
   const messages: Record<string, string> = {
@@ -139,10 +139,15 @@ export default function App() {
               </h1>
               <span>{filtered.length} sample edits</span>
             </div>
-            {filtered.length ? (
+            {loading ? (
+              <DiscoveryGridSkeleton
+                count={8}
+                label="Loading discovery edits..."
+              />
+            ) : filtered.length ? (
               <ContentSection
                 title="Discover"
-                items={category === "New" ? [...filtered].reverse() : filtered}
+                items={filtered}
                 onSelect={(e) => {
                   choose(e);
                   setQuery("");

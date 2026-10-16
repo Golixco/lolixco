@@ -605,6 +605,85 @@ main {
 .compact .thumbnail {
   aspect-ratio: 16/9;
 }
+.skeleton-card {
+  pointer-events: none;
+  user-select: none;
+  cursor: default;
+  border-color: transparent !important;
+}
+.skeleton-thumb {
+  background: #10151e;
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-shimmer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.04) 50%,
+    transparent 100%
+  );
+  animation: skeleton-shimmer 1.4s infinite linear;
+}
+@keyframes skeleton-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.skeleton-copy {
+  display: flex;
+  flex-direction: column;
+}
+.skeleton-line {
+  background: #141924;
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-line::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.03) 50%,
+    transparent 100%
+  );
+  animation: skeleton-shimmer 1.4s infinite linear;
+}
+.skeleton-title {
+  height: 16px;
+  width: 80%;
+  margin: 6px 0 4px;
+}
+.skeleton-creator {
+  height: 11px;
+  width: 55%;
+  margin-bottom: 4px;
+}
+.skeleton-tag {
+  height: 10px;
+  width: 38%;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .content-section {
   margin-top: 14px;
 }
@@ -1069,6 +1148,7 @@ dialog .fine-print {
   *::before,
   *::after {
     transition: none !important;
+    animation: none !important;
     scroll-behavior: auto !important;
   }
 }

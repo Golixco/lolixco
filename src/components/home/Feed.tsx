@@ -112,3 +112,7 @@ export function ContentSection({
     </section>
   );
 }
+
+export { VideoCardSkeleton } from "./VideoCardSkeleton";
+export { DiscoveryGridSkeleton } from "./DiscoveryGridSkeleton";
+

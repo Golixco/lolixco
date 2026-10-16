@@ -1,5 +1,7 @@
+import { useEffect, useRef } from "react";
 import { Menu, Search, X, Plus, Bell } from "lucide-react";
 import { BrandLogo } from "./BrandLogo";
+
 export default function Header({
   expanded,
   toggle,
@@ -17,6 +19,30 @@ export default function Header({
   member: boolean;
   open: (s: string) => void;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const activeEl = document.activeElement;
+        const isEditable =
+          activeEl instanceof HTMLInputElement ||
+          activeEl instanceof HTMLTextAreaElement ||
+          activeEl instanceof HTMLSelectElement ||
+          (activeEl instanceof HTMLElement && activeEl.isContentEditable);
+
+        // Do not intercept if focus is inside an editable field or active player controls
+        if (!isEditable && inputRef.current && activeEl !== inputRef.current) {
+          e.preventDefault();
+          inputRef.current.focus();
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
+
   return (
     <header>
       <div className="header-brand">
@@ -32,24 +58,42 @@ export default function Header({
         </button>
         <BrandLogo onHome={onHome} />
       </div>
-      <label className="search">
-        <Search size={19} />
+      <form
+        className="search"
+        role="search"
+        onSubmit={(e) => e.preventDefault()}
+      >
+        <Search size={19} aria-hidden="true" />
         <input
+          ref={inputRef}
           aria-label="Search"
           placeholder="Search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              if (query) {
+                setQuery("");
+              } else {
+                inputRef.current?.blur();
+              }
+            }
+          }}
         />
         {query && (
           <button
+            type="button"
             aria-label="Clear search"
             className="icon-button"
-            onClick={() => setQuery("")}
+            onClick={() => {
+              setQuery("");
+              inputRef.current?.focus();
+            }}
           >
-            <X size={16} />
+            <X size={16} aria-hidden="true" />
           </button>
         )}
-      </label>
+      </form>
       <div className="header-actions">
         {member ? (
           <>
