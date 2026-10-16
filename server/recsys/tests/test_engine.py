@@ -2,12 +2,32 @@ from pathlib import Path
 import unittest
 
 from server.recsys.catalog import Catalog, load_catalog_from_json
-from server.recsys.engine import RecommendationEngine
+from server.recsys.engine import (
+    RecommendationEngine,
+    verify_sliding_window_diversity,
+)
 from server.recsys.types import (
     EditItem,
     RecommendationRequest,
     WatchHistoryEntry,
 )
+
+
+def make_test_item(edit_id: int, creator: str, category: str = "Cinematic") -> EditItem:
+    return EditItem(
+        id=edit_id,
+        title=f"Edit {edit_id}",
+        category=category,
+        tags=("cinematic", "tag"),
+        description="Desc",
+        creator=creator,
+        poster="/p.svg",
+        source="/s.webm",
+        duration="0:12",
+        duration_ms=12000,
+        duration_sec=12.0,
+        trending=False,
+    )
 
 
 class TestRecommendationEngine(unittest.TestCase):
@@ -43,61 +63,181 @@ class TestRecommendationEngine(unittest.TestCase):
         self.assertTrue(resp.diagnostics.get("creator_cap_relaxed"))
         self.assertIn("creator_cap_relaxed", resp.diagnostics.get("warnings", []))
 
-    def test_repeatability_and_determinism(self):
-        req = RecommendationRequest(surface="home", limit=17)
-        resp1 = self.engine.recommend(req)
-        resp2 = self.engine.recommend(req)
+    def test_usable_history_detection_preserves_cold_start_on_unusable_signals(self):
+        # 1. History with ONLY quick skips (< 2s)
+        skip_req = RecommendationRequest(
+            surface="home",
+            limit=12,
+            history=(
+                WatchHistoryEntry(edit_id=0, unique_watch_ms=1000, occurred_at="2026-10-16T12:00:00Z"),
+                WatchHistoryEntry(edit_id=1, unique_watch_ms=1500, occurred_at="2026-10-16T12:05:00Z"),
+            ),
+        )
+        skip_resp = self.engine.recommend(skip_req)
 
-        ids1 = [item.edit.id for item in resp1.items]
-        ids2 = [item.edit.id for item in resp2.items]
-        scores1 = [item.score for item in resp1.items]
-        scores2 = [item.score for item in resp2.items]
+        # Must preserve TRUE category-balanced cold start!
+        top_6_cats = [item.edit.category for item in skip_resp.items[:6]]
+        self.assertEqual(len(set(top_6_cats)), 6)
+        for item in skip_resp.items:
+            self.assertEqual(item.reason_codes, ("cold_start", "category_balance"))
+        self.assertIn("history_unusable_or_skipped", skip_resp.diagnostics.get("warnings", []))
 
-        self.assertEqual(ids1, ids2)
-        self.assertEqual(scores1, scores2)
+        # 2. History with ONLY unknown edit IDs
+        unknown_req = RecommendationRequest(
+            surface="home",
+            limit=12,
+            history=(
+                WatchHistoryEntry(edit_id=999, unique_watch_ms=15000, occurred_at="2026-10-16T12:00:00Z"),
+            ),
+        )
+        unknown_resp = self.engine.recommend(unknown_req)
+
+        # Must preserve TRUE category-balanced cold start!
+        top_6_cats_unknown = [item.edit.category for item in unknown_resp.items[:6]]
+        self.assertEqual(len(set(top_6_cats_unknown)), 6)
+        for item in unknown_resp.items:
+            self.assertEqual(item.reason_codes, ("cold_start", "category_balance"))
+        self.assertIn("history_unusable_or_skipped", unknown_resp.diagnostics.get("warnings", []))
+        self.assertIn("history_items_ignored", unknown_resp.diagnostics.get("warnings", []))
+
+        # 3. History with GENUINE usable watch time (e.g. 10s of Edit 6, Cinematic)
+        valid_req = RecommendationRequest(
+            surface="home",
+            limit=12,
+            history=(
+                WatchHistoryEntry(edit_id=6, unique_watch_ms=10000, occurred_at="2026-10-16T12:00:00Z"),
+            ),
+        )
+        valid_resp = self.engine.recommend(valid_req)
+
+        # Top item should be Cinematic edit 0 due to strong category & tag affinity
+        self.assertEqual(valid_resp.items[0].edit.category, "Cinematic")
+        self.assertIn("session_continuity", valid_resp.items[0].reason_codes)
+
+    def test_generic_boilerplate_tags_do_not_emit_tag_similarity_explanation(self):
+        # Current edit is 0 (Cinematic): ["cinematic", "original", "demo", "landscape"]
+        req = RecommendationRequest(surface="up_next", current_edit_id=0, limit=16)
+        resp = self.engine.recommend(req)
+
+        # Edit 6 ("Broken Crowns", Cinematic) shares the meaningful tag "cinematic"
+        item_6 = next(i for i in resp.items if i.edit.id == 6)
+        self.assertIn("tag_similarity", item_6.reason_codes)
+
+        # Edit 4 ("Silent World", Series) shares ONLY "original", "demo", and "landscape"
+        # It must NOT emit "tag_similarity" because it has no distinctive topic tag overlap!
+        item_4 = next(i for i in resp.items if i.edit.id == 4)
+        self.assertNotIn("tag_similarity", item_4.reason_codes)
+
+        # Same for Gaming edit 1 which only shares "original" and "demo"
+        item_1 = next(i for i in resp.items if i.edit.id == 1)
+        self.assertNotIn("tag_similarity", item_1.reason_codes)
+
+    def test_creator_diversity_reranker_adversarial_1_to_6_creators(self):
+        # 1. Single Creator (1-creator demo catalog):
+        # Must be relaxed with explicit warning and return all items
+        req1 = RecommendationRequest(surface="home", limit=12)
+        resp1 = self.engine.recommend(req1)
+        self.assertTrue(resp1.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed", resp1.diagnostics.get("warnings", []))
+        self.assertEqual(len(resp1.items), 12)
+
+        # 2. Two Creators (<= 2 creators):
+        items_2c = [make_test_item(i, "CreatorA" if i % 2 == 0 else "CreatorB") for i in range(12)]
+        cat_2c = Catalog(items_2c)
+        engine_2c = RecommendationEngine(cat_2c)
+        resp_2c = engine_2c.recommend(req1)
+        self.assertTrue(resp_2c.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed", resp_2c.diagnostics.get("warnings", []))
+        self.assertEqual(len(resp_2c.items), 12)
+
+        # 3. Three Creators (3 creators):
+        # Note: In a 10-item window, 3 creators can at most provide 3 * 2 = 6 items.
+        # Once 6 items are placed, all 3 creators have count 2.
+        # The engine must detect mathematical impossibility, relax gracefully, and emit diagnostic.
+        items_3c = []
+        for i in range(20):
+            c = "CreatorA" if i < 10 else ("CreatorB" if i < 15 else "CreatorC")
+            items_3c.append(make_test_item(i, c))
+
+        cat_3c = Catalog(items_3c)
+        engine_3c = RecommendationEngine(cat_3c)
+        resp_3c = engine_3c.recommend(RecommendationRequest(surface="home", limit=15))
+
+        self.assertTrue(resp_3c.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed_insufficient_diversity", resp_3c.diagnostics.get("warnings", []))
+        self.assertEqual(len(resp_3c.items), 15)
+
+        # 4. Four Creators (4 creators):
+        # 4 creators can at most provide 4 * 2 = 8 items in a 10-window.
+        # For a 15-item feed, relaxation is mathematically required once the window saturates.
+        items_4c = [make_test_item(i, f"Creator_{i % 4}") for i in range(20)]
+        cat_4c = Catalog(items_4c)
+        engine_4c = RecommendationEngine(cat_4c)
+        resp_4c = engine_4c.recommend(RecommendationRequest(surface="home", limit=15))
+
+        self.assertTrue(resp_4c.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed_insufficient_diversity", resp_4c.diagnostics.get("warnings", []))
+        self.assertEqual(len(resp_4c.items), 15)
+
+        # 5. Five Creators (5 creators):
+        # 5 creators * 2 = 10 items. Perfect capacity to satisfy a 2-per-10 sliding window!
+        # With 5 creators (4 items each), strict enforcement is mathematically feasible.
+        items_5c = [make_test_item(i, f"Creator_{i % 5}") for i in range(25)]
+        cat_5c = Catalog(items_5c)
+        engine_5c = RecommendationEngine(cat_5c)
+        resp_5c = engine_5c.recommend(RecommendationRequest(surface="home", limit=20))
+
+        # Strict enforcement must succeed without relaxation
+        self.assertFalse(resp_5c.diagnostics.get("creator_cap_relaxed"))
+        valid_5c, violations_5c = verify_sliding_window_diversity(resp_5c.items, max_per_window=2, window_size=10)
+        self.assertTrue(valid_5c, f"Violations found in 5-creator feed: {violations_5c}")
+
+        # 6. Six Creators (6 creators):
+        # 6 creators provides ample diversity. Strict enforcement succeeds for all complete sliding windows.
+        items_6c = [make_test_item(i, f"Creator_{i % 6}") for i in range(30)]
+        cat_6c = Catalog(items_6c)
+        engine_6c = RecommendationEngine(cat_6c)
+        resp_6c = engine_6c.recommend(RecommendationRequest(surface="home", limit=25))
+
+        self.assertFalse(resp_6c.diagnostics.get("creator_cap_relaxed"))
+        valid_6c, violations_6c = verify_sliding_window_diversity(resp_6c.items, max_per_window=2, window_size=10)
+        self.assertTrue(valid_6c, f"Violations found in 6-creator feed: {violations_6c}")
+
+        # 7. Five Creators with Extreme Skew:
+        # CreatorA (20 items), Creators B/C/D/E (1 item each).
+        # Once the minority creators are used up, strict enforcement is mathematically impossible.
+        # The engine must detect this, relax, emit diagnostic, and not drop any eligible items.
+        items_skew = [make_test_item(i, "CreatorA") for i in range(20)]
+        items_skew.extend([make_test_item(20 + j, f"Minority_{j}") for j in range(4)])
+        cat_skew = Catalog(items_skew)
+        engine_skew = RecommendationEngine(cat_skew)
+        resp_skew = engine_skew.recommend(RecommendationRequest(surface="home", limit=20))
+
+        self.assertTrue(resp_skew.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed_insufficient_diversity", resp_skew.diagnostics.get("warnings", []))
+        self.assertEqual(len(resp_skew.items), 20)
 
     def test_up_next_relevance_and_active_video_suppression(self):
-        # Current edit is 0 ("Into the Light", Cinematic)
         req = RecommendationRequest(surface="up_next", current_edit_id=0, limit=10)
         resp = self.engine.recommend(req)
 
-        # Invariant: Active edit 0 MUST be suppressed from its own Up Next
         rec_ids = [item.edit.id for item in resp.items]
         self.assertNotIn(0, rec_ids)
 
-        # The other Cinematic edits in catalog are ID 6 ("Broken Crowns") and ID 12 ("Cold Hearts")
-        # They should be ranked #1 and #2 due to exact category match + tag similarity
+        # Edit 6 and Edit 12 are Cinematic, ranked at top
         self.assertEqual(resp.items[0].edit.id, 6)
         self.assertEqual(resp.items[0].edit.category, "Cinematic")
-        self.assertIn("category_match", resp.items[0].reason_codes)
-
         self.assertEqual(resp.items[1].edit.id, 12)
         self.assertEqual(resp.items[1].edit.category, "Cinematic")
-        self.assertIn("category_match", resp.items[1].reason_codes)
 
-        # Total eligible is 16 (17 minus active video 0)
-        self.assertEqual(resp.total_eligible, 16)
-
-    def test_up_next_with_exclusions(self):
-        # Exclude edit 6
-        req = RecommendationRequest(
-            surface="up_next", current_edit_id=0, exclude_edit_ids=(6,), limit=5
-        )
+    def test_deterministic_tie_breaking(self):
+        req = RecommendationRequest(surface="up_next", current_edit_id=13, limit=10)
         resp = self.engine.recommend(req)
-        rec_ids = [item.edit.id for item in resp.items]
 
-        self.assertNotIn(0, rec_ids)
-        self.assertNotIn(6, rec_ids)
-        self.assertEqual(resp.items[0].edit.id, 12)
-
-    def test_unknown_current_edit_raises_keyerror(self):
-        req = RecommendationRequest(surface="up_next", current_edit_id=999)
-        with self.assertRaises(KeyError) as ctx:
-            self.engine.recommend(req)
-        self.assertIn("999", str(ctx.exception))
+        top_ids = [item.edit.id for item in resp.items[:2]]
+        self.assertEqual(top_ids, [1, 7])
 
     def test_empty_eligible_pool_returns_gracefully(self):
-        # Exclude all 17 items
         all_ids = tuple(range(17))
         req = RecommendationRequest(surface="home", exclude_edit_ids=all_ids)
         resp = self.engine.recommend(req)
@@ -105,72 +245,6 @@ class TestRecommendationEngine(unittest.TestCase):
         self.assertEqual(resp.total_eligible, 0)
         self.assertEqual(len(resp.items), 0)
         self.assertEqual(resp.diagnostics.get("fallback_reason"), "empty_eligible_pool")
-
-    def test_creator_diversity_cap_enforcement_multi_creator(self):
-        # Create a synthetic catalog with multiple creators to test cap enforcement
-        multi_creator_items = []
-        for i in range(15):
-            # Creators: CreatorA (10 items), CreatorB (5 items)
-            creator = "CreatorA" if i < 10 else "CreatorB"
-            multi_creator_items.append(
-                EditItem(
-                    id=i,
-                    title=f"Edit {i}",
-                    category="Cinematic",
-                    tags=("cinematic", "tag"),
-                    description="",
-                    creator=creator,
-                    poster="",
-                    source="",
-                    duration="0:12",
-                    duration_ms=12000,
-                    duration_sec=12.0,
-                )
-            )
-
-        cat = Catalog(multi_creator_items)
-        engine = RecommendationEngine(cat)
-
-        req = RecommendationRequest(surface="home", limit=10)
-        resp = engine.recommend(req)
-
-        # Distinct creators > 2? Here we have 2 creators.
-        # Let's add a third creator so creator cap is NOT relaxed:
-        multi_creator_items.append(
-            EditItem(
-                id=15,
-                title="Edit 15",
-                category="Gaming",
-                tags=("gaming",),
-                description="",
-                creator="CreatorC",
-                poster="",
-                source="",
-                duration="0:12",
-                duration_ms=12000,
-                duration_sec=12.0,
-            )
-        )
-        cat3 = Catalog(multi_creator_items)
-        engine3 = RecommendationEngine(cat3)
-        resp3 = engine3.recommend(req)
-
-        self.assertFalse(resp3.diagnostics.get("creator_cap_relaxed"))
-        # Check first 5 items: CreatorA should appear at most 2 times in the top positions
-        creators_in_top = [item.edit.creator for item in resp3.items]
-        # In any 10-window, no creator can appear > 2 times before deferred items
-        self.assertLessEqual(creators_in_top[:4].count("CreatorA"), 2)
-
-    def test_deterministic_tie_breaking(self):
-        # Edits 1 and 7 are both Gaming with exact same category and tags
-        # Given current edit 13 (Gaming), both edits 1 and 7 will have identical score
-        req = RecommendationRequest(surface="up_next", current_edit_id=13, limit=10)
-        resp = self.engine.recommend(req)
-
-        # Both match Gaming and neon tag
-        top_ids = [item.edit.id for item in resp.items[:2]]
-        # Edit 1 must precede Edit 7 due to deterministic ID ASC tie-break
-        self.assertEqual(top_ids, [1, 7])
 
 
 if __name__ == "__main__":

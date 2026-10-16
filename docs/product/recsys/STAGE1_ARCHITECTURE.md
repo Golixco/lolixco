@@ -2,7 +2,7 @@
 
 **Author:** Antigravity (Linux) — Lead Recommendation Systems Engineer  
 **Date:** 2026-10-16  
-**Status:** Approved Design Specification  
+**Status:** Approved Design Specification (v2 Post-Review Corrections)  
 **Location:** `server/recsys/`  
 **Branch:** `feat/recsys-baseline`  
 **Base:** `origin/main` at `174d01a89d1f83f47f4279b7e62ca2babdb1f294`
@@ -15,10 +15,10 @@ The Stage 1 Recommendation Engine provides an independent, deterministic, and ex
 
 ### 1.1 Key Invariants
 1. **Zero Fabricated Metrics:** No manufactured view counts, fake upload timestamps, synthetic user profiles, or simulated accuracy metrics.
-2. **Numeric ID Integrity:** Every catalog edit is identified by a strict integer `id >= 0`. `id = 0` is a valid, distinct identifier and must never be treated as falsy or dropped.
-3. **Data Grounding:** The catalog is derived directly from the canonical frontend fixture in `src/data/edits.ts`. Automated drift checks ensure 100% synchronization.
+2. **Numeric ID Integrity:** Every catalog edit is identified by a strict integer `id >= 0`. `id = 0` is a valid, distinct identifier. Python booleans (`True`/`False`), which subclass `int`, are strictly rejected by type checking.
+3. **Data Grounding & Drift Resistance:** The catalog is derived directly from the canonical frontend fixture in `src/data/edits.ts`. Automated envelope, count, and schema drift checks ensure 100% synchronization and reject unauthorized tampering.
 4. **Service Independence:** The recommendation engine is designed as a pure, dependency-free Python library (using Python 3 standard library only). It is decoupled from HTTP servers, databases, and client UI components.
-5. **Explainability:** All recommendation decisions return structured, unambiguous reason codes (`cold_start`, `category_balance`, `category_match`, `tag_similarity`, `session_continuity`) alongside diagnostic warnings.
+5. **Truth in Telemetry & Explainability:** Reason codes (`cold_start`, `category_balance`, `category_match`, `tag_similarity`, `session_continuity`) reflect the algorithm actually used. Boilerplate fixture tags do not trigger spurious similarity reasons, and empty or skipped histories do not degrade into unexplainable ID-order rankings.
 
 ---
 
@@ -28,78 +28,33 @@ The implementation in `server/recsys/` is organized into clean, focused modules:
 
 ```
 server/recsys/
-├── __init__.py
-├── types.py            # Strongly typed dataclasses for Edits, Requests, Responses, and Diagnostics
-├── catalog.py          # Catalog loading, validation, duration parsing, indexing
-├── export_catalog.py   # Synchronizer and drift detector between src/data/edits.ts and JSON snapshot
-├── similarity.py       # IDF-weighted tag similarity and category affinity calculations
-├── engine.py           # Core deterministic recommendation engine (Home and Up Next)
+├── __init__.py            # Library exports
+├── types.py               # Frozen dataclasses with strict schema validation
+├── catalog.py             # Catalog loading, indexing, validation, and duration parsing
+├── similarity.py          # IDF tag weighting, boilerplate suppression, and history extraction
+├── engine.py              # Pure-function RecommendationEngine (Home and Up Next)
+├── export_catalog.py      # Automated snapshot generator and drift detector
+├── catalog_snapshot.json  # Synchronized snapshot of the 17-item catalog
 └── tests/
     ├── __init__.py
-    ├── test_catalog.py # Tests for catalog validation, ID 0, duration parsing, error handling
-    ├── test_drift.py   # Tests for source-to-snapshot integrity and drift detection
-    └── test_engine.py  # Tests for Home round-robin, Up Next relevance, exclusions, relaxation
+    ├── test_catalog.py    # Duration parsing, ID 0 preservation, strict type & schema validation
+    ├── test_similarity.py # IDF weights, boilerplate tags, meaningful tags, history filtering
+    ├── test_engine.py     # Home balance, Up Next relevance, diversity (1-6 creators), tie-breaking
+    └── test_drift.py      # Automated positive and negative drift integration tests
 ```
 
 ---
 
-## 3. Data Models & Normalization (`types.py`)
+## 3. Data Models & Strict Schema Validation (`types.py`, `catalog.py`)
 
-### 3.1 Item Representation
-```python
-@dataclass(frozen=True)
-class EditItem:
-    id: int
-    title: string
-    category: string
-    tags: tuple[str, ...]
-    description: str
-    creator: str
-    poster: str
-    source: str
-    duration: str          # Raw string, e.g. "0:12"
-    duration_ms: int       # Normalized milliseconds, e.g. 12000
-    duration_sec: float    # Normalized seconds, e.g. 12.0
-    trending: bool
-```
-
-### 3.2 Request & Session Context
-```python
-@dataclass(frozen=True)
-class WatchHistoryEntry:
-    edit_id: int
-    unique_watch_ms: int   # Bounded non-negative watch duration
-    occurred_at: str       # ISO 8601 string
-
-@dataclass(frozen=True)
-class RecommendationRequest:
-    surface: str                      # "home" or "up_next"
-    current_edit_id: Optional[int]    # Required for "up_next", None for "home"
-    limit: int = 12                   # Bounded 1..50
-    exclude_edit_ids: tuple[int, ...] = ()
-    history: tuple[WatchHistoryEntry, ...] = ()
-    category_filter: Optional[str] = None
-```
-
-### 3.3 Recommendation Result Envelope
-```python
-@dataclass(frozen=True)
-class RecommendedItem:
-    rank: int              # 1-based index
-    edit: EditItem
-    score: float           # Normalized score in [0.0, 1.0]
-    reason_codes: tuple[str, ...]
-
-@dataclass(frozen=True)
-class RecommendationResponse:
-    surface: str
-    mode_used: str         # "baseline"
-    catalog_version: str
-    policy_version: str
-    items: tuple[RecommendedItem, ...]
-    total_eligible: int
-    diagnostics: dict
-```
+### 3.1 Strict Type Constraints
+In Python, `isinstance(True, int)` evaluates to `True`. To prevent type corruption:
+- `EditItem.id`: Validated with `type(id) is int and id >= 0`.
+- `EditItem.tags`: Must be a `list` or `tuple` of non-empty strings. Bare strings (e.g. `"gaming"`) are explicitly rejected to prevent character-by-character decomposition.
+- `EditItem.trending`: Must be a strict `bool` (`type is bool`). String `"false"` is strictly rejected.
+- `EditItem.duration`: Missing duration is strictly rejected. Defaulting missing durations to `"0:12"` is prohibited.
+- `Catalog.from_dict_list`: Enforces `ALLOWED_FIELDS` and `REQUIRED_FIELDS`. Unexpected extra fields in raw records raise a `ValueError`.
+- `RecommendationRequest`: Validates limit ($1 \le \text{limit} \le 50$), `current_edit_id`, `exclude_edit_ids`, and ensures history elements are `WatchHistoryEntry` instances.
 
 ---
 
@@ -107,53 +62,68 @@ class RecommendationResponse:
 
 ### 4.1 Up Next Scoring (`surface == "up_next"`)
 
-For a candidate edit $i$ given currently watched edit $c$ and optional session history $H$:
+For a candidate edit $i$ given currently watched edit $c$ and validated usable history $H$:
 
-1. **Eligibility Filter:**
+1. **Active Suppression & Eligibility Filter:**
    $$i \in \text{Catalog} \setminus (\{c\} \cup \text{exclude\_edit\_ids})$$
 
 2. **Category Context Score $C(i, c)$:**
    $$C(i, c) = \begin{cases} 1.0 & \text{if } i.\text{category} == c.\text{category} \\ 0.0 & \text{otherwise} \end{cases}$$
 
-3. **IDF-Weighted Tag Similarity $T_{\text{IDF}}(i, c)$:**
-   To prevent high false-positive similarity from ubiquitous demo tags (`original`, `demo`, `landscape`, `neon`), each tag $t$ has an inverse document frequency weight:
-   $$\text{IDF}(t) = \ln\left(1 + \frac{N}{|\{e \in \text{Catalog} : t \in e.\text{tags}\}|}\right)$$
-   The weighted similarity is:
+3. **IDF-Weighted Tag Similarity $T_{\text{IDF}}(i, c)$ with Boilerplate Suppression:**
+   Boilerplate fixture tags (`original`, `demo`) that appear across the catalog receive a fixed minimal weight ($0.01$). Informative topic tags receive full logarithmic IDF weight:
+   $$\text{IDF}(t) = \ln\left(1 + \frac{N}{\text{DF}(t)}\right)$$
+   Weighted similarity is computed across non-boilerplate tags:
    $$T_{\text{IDF}}(i, c) = \frac{\sum_{t \in i.\text{tags} \cap c.\text{tags}} \text{IDF}(t)}{\sum_{t \in i.\text{tags} \cup c.\text{tags}} \text{IDF}(t)}$$
-   If both sets have zero weighted tags, $T_{\text{IDF}} = 0.0$.
 
-4. **Dynamic Renormalized Score:**
-   Because publication timestamps and historical quality telemetry are absent from the 17-item demo catalog, available signals are dynamically renormalized to span the full $[0.0, 1.0]$ range:
+4. **Meaningful Tag Discrimination for Reason Codes:**
+   `tag_similarity` is ONLY emitted if:
+   $$\text{MeaningfulSharedTags}(i, c) = \{t \in i.\text{tags} \cap c.\text{tags} : \text{DF}(t) < 0.5 \cdot N \land t \notin \text{BOILERPLATE}\} \neq \emptyset$$
+   Cross-category edits that share only boilerplate tags never emit a `tag_similarity` explanation.
+
+5. **Dynamic Renormalized Score:**
    $$\text{Score}(i) = w_C \cdot C(i, c) + w_T \cdot T_{\text{IDF}}(i, c) + w_H \cdot S(i, H)$$
-   - Without history: $w_C = 0.55$, $w_T = 0.45$, $w_H = 0.00$.
-   - With session history: $w_C = 0.45$, $w_T = 0.35$, $w_H = 0.20$.
+   - With usable history: $w_C = 0.45$, $w_T = 0.35$, $w_H = 0.20$.
+   - Without usable history: $w_C = 0.55$, $w_T = 0.45$, $w_H = 0.00$.
    - **Tie-Breaking:** Deterministic sort by `score` DESC, then `id` ASC.
 
-### 4.2 Home Discovery Cold-Start (`surface == "home"`)
+### 4.2 Home Discovery & Usable-History Gating (`surface == "home"`)
 
-When a user visits the home feed without session history:
-1. Candidate pool is filtered by `exclude_edit_ids` and optional `category_filter`.
-2. Edits are partitioned into lists by canonical category:
-   $$\text{Buckets} = \{\text{Cat}_1: [e_{1,1}, e_{1,2}, \dots], \dots, \text{Cat}_6: [e_{6,1}, e_{6,2}, \dots]\}$$
-   Each bucket is sorted by `id` ASC.
-3. Items are interleaved across categories using round-robin selection:
-   $$\text{Interleaved} = [\text{Cat}_1[0], \text{Cat}_2[0], \dots, \text{Cat}_6[0], \text{Cat}_1[1], \dots]$$
-4. This guarantees that the top 6 positions display all 6 canonical categories (*Cinematic*, *Gaming*, *Anime*, *Movies*, *Series*, *Phonk*), providing diverse discovery without bias.
-5. Reason codes emitted: `["cold_start", "category_balance"]`.
+1. **Usable-History Extraction (`get_usable_history`):**
+   Entries in `request.history` are filtered:
+   - Must reference a valid edit present in the catalog.
+   - User must have watched at least $2,000\,\text{ms}$ (2 seconds) to distinguish true interest from bounces/skips.
+   - If ignored entries exist, emit `"history_items_ignored"`.
+2. **Cold-Start Preservation:**
+   If `usable_history` is empty (including requests where all entries were quick skips or unknown IDs):
+   - The engine **must not** degrade into arbitrary ID-order sorting.
+   - It performs **deterministic category round-robin interleaving** across all 6 canonical categories.
+   - Emits reason codes `("cold_start", "category_balance")`.
+   - If skipped/unknown history was submitted, emits `"history_unusable_or_skipped"`.
+3. **History-Aware Ranking:**
+   Only executed when genuine, validated watch signals exist. Blends contextual affinity with base discovery.
 
-### 4.3 Creator Diversity Policy & Adaptive Relaxation
+### 4.3 Creator Diversity Policy & Sliding-Window Reranker
 
-- **Standard Rule:** No more than 2 items from the same creator in any consecutive window of 10 recommendations.
-- **Adaptive Relaxation:** If the total number of distinct creators in the eligible candidate pool is $\le 2$ (e.g. all 17 items from `"Lolixco demo"`), applying the rule would cause catalog collapse.
-- The engine checks:
-  $$\text{if } |\text{UniqueCreators}(\text{Eligible})| \le 2: \quad \text{Relax Rule} \land \text{Emit Warning } \text{"creator_cap_relaxed"}$$
+- **Policy:** In any sliding window of length 10 in the returned list, no single creator may appear more than 2 times.
+- **Mathematical Feasibility:**
+  By the Pigeonhole Principle, to satisfy $\le 2$ items per creator in a window of size 10, the candidate pool must contain at least:
+  $$N_{\text{creators}} \ge \lceil 10 / 2 \rceil = 5 \text{ distinct creators}$$
+  With 1, 2, 3, or 4 creators, strict enforcement across a 10-item window is mathematically impossible once the window capacity ($2 \times N_{\text{creators}}$) is reached.
+- **Deterministic Reranker Algorithm:**
+  1. If $N_{\text{unique\_creators}} \le 2$ (e.g. 1-creator demo catalog): Upfront relaxation occurs. Emits `creator_cap_relaxed: true` and `"creator_cap_relaxed"`. All eligible items are preserved without truncation.
+  2. If $N_{\text{unique\_creators}} > 2$: Greedy placement with sliding-window lookahead. For each output position, the engine selects the highest-ranked remaining candidate whose creator count in the preceding 9 items is $< 2$.
+  3. When candidate diversity is exhausted (e.g. highly skewed creator distributions): The engine detects mathematical impossibility, relaxes the cap, emits `"creator_cap_relaxed_insufficient_diversity"`, and places candidates to minimize creator concentration without dropping content.
+  4. **Verification:** `verify_sliding_window_diversity()` inspects every complete sliding window $[i : i + 10]$ in the returned list.
 
 ---
 
 ## 5. Source-to-Snapshot Synchronization & Drift Prevention
 
-To guarantee that the recommendation engine reflects active product data:
-1. `server/recsys/export_catalog.py` executes a validated Node export script (`node --import ./tests/register-ts.mjs ...`) that imports `src/data/edits.ts` directly.
-2. The export writes an authoritative snapshot to `server/recsys/catalog_snapshot.json`.
-3. A `--check` mode compares the active TypeScript fixture output with the saved snapshot.
-4. If any title, duration, category, or tag diverges, the check exits with code 1 and outputs a granular diff. This check runs in automated tests to prevent silent data drift.
+`server/recsys/export_catalog.py` implements a tamper-proof synchronization and drift check:
+1. Executes `node --import ./tests/register-ts.mjs` to extract `src/data/edits.ts` with 100% native fidelity.
+2. Validates snapshot envelope keys (`catalog_version`, `total_edits`, `edits`).
+3. Verifies that `total_edits` strictly matches the actual record count and the live TypeScript edit count.
+4. Validates record schemas, rejecting unexpected extra keys or missing required fields.
+5. Compares property-level values between live TypeScript source and snapshot.
+6. Automated unit tests in `test_drift.py` verify both positive synchronization and negative tamper detection (tampered versions, altered counts, injected fields, and mutated values).

@@ -61,16 +61,16 @@ In accordance with rigorous empirical engineering standards, every assertion in 
    6. *Treehouse* (Tongji D&I) — Student animated graduation film.
    7. *Overwatch Animated Short | "The Last Bastion"* (PlayOverwatch) — Cinematic game CGI.
 
-2. **Structural & Diversity Patterns [OBSERVED]:**
-   - **Strict Active-Video Suppression [OBSERVED]:** The currently playing video (*Spring*) was strictly absent from the recommendation sidebar.
+2. **Structural & Diversity Patterns [OBSERVED on target watch page]:**
+   - **Strict Active-Video Suppression [OBSERVED]:** The currently playing video (*Spring*) was strictly absent from the recommendation sidebar on the inspected watch page.
    - **Thematic Coherence [OBSERVED]:** 100% of the top 7 suggestions belonged to the broader creative genre of *Animated Short Films / CGI Cinematics*.
-   - **Creator Diversity Mix [OBSERVED]:** The current creator (*Blender Studio*) appeared exactly once in the top 7 (at position #3), while the remaining 6 items were from distinct creative studios. YouTube did not monopolize the sidebar with Blender Studio videos despite high channel affinity.
+   - **Creator Diversity Mix [OBSERVED]:** The current creator (*Blender Studio*) appeared exactly once in the top 7 (at position #3), while the remaining 6 items were from distinct creative studios.
    - **Topic Filter Chips [OBSERVED]:** Horizontal chips above the related video column allowed user-driven pivots: *"All"*, *"From Blender Studio"*, *"Related"*, *"Recently uploaded"*.
 
-3. **Relevance for Lolixco [INFERRED]:**
-   - Up Next must be anchored strongly by **category match** and **semantic tag similarity**.
-   - Active video suppression is mandatory.
-   - In Lolixco's production scenario, creator throttling (max 2 consecutive items per creator) is vital to prevent feed capture. However, because the current fixture catalog has only *one* creator (`"Lolixco demo"`), the engine must gracefully relax this constraint and emit diagnostic telemetry rather than truncating the feed.
+3. **Inference Boundaries & Limitations [INFERRED / UNKNOWN]:**
+   - **Epistemic Boundary:** Directly inspecting a single public watch page demonstrates an instance of YouTube's presentation layer, but does **not** prove its universal internal algorithm, hidden diversity thresholds, or dynamic pacing across millions of channels [UNKNOWN].
+   - **Universal Policies Unknown:** Whether YouTube enforces a hard mathematical creator cap or uses soft diversity penalisations (e.g. DPP - Determinantal Point Processes) cannot be proven externally [UNKNOWN].
+   - **Lolixco Adaptation:** Regardless of YouTube's private internal parameters, Lolixco benefits from an explicit, deterministic sliding-window cap when multiple creators exist, paired with graceful relaxation when the demo catalog has insufficient creator entropy.
 
 ---
 

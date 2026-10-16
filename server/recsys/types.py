@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
 class EditItem:
-    """Canonical representation of an edit in the recommendation engine."""
+    """Canonical representation of an edit in the recommendation engine with strict schema validation."""
 
     id: int
     title: str
@@ -20,16 +20,46 @@ class EditItem:
     trending: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, int) or self.id < 0:
-            raise ValueError(f"Edit id must be non-negative integer, got {self.id}")
-        if not self.title or not isinstance(self.title, str):
-            raise ValueError("Edit title must be non-empty string")
-        if not self.category or not isinstance(self.category, str):
-            raise ValueError("Edit category must be non-empty string")
-        if not isinstance(self.tags, (tuple, list)):
-            raise ValueError("Edit tags must be sequence of strings")
-        if not isinstance(self.duration_ms, int) or self.duration_ms <= 0:
-            raise ValueError(f"duration_ms must be positive integer, got {self.duration_ms}")
+        # Strict integer check: Python booleans are subclasses of int, so reject bool explicitly
+        if type(self.id) is not int or self.id < 0:
+            raise TypeError(f"Edit id must be strict non-negative integer, got {type(self.id).__name__}: {self.id!r}")
+
+        if type(self.title) is not str or not self.title.strip():
+            raise TypeError(f"Edit title must be non-empty string, got {type(self.title).__name__}: {self.title!r}")
+
+        if type(self.category) is not str or not self.category.strip():
+            raise TypeError(f"Edit category must be non-empty string, got {type(self.category).__name__}: {self.category!r}")
+
+        if not isinstance(self.tags, (tuple, list)) or isinstance(self.tags, (str, bytes)):
+            raise TypeError(f"Edit tags must be sequence of strings, got {type(self.tags).__name__}: {self.tags!r}")
+
+        for t in self.tags:
+            if type(t) is not str or not t.strip():
+                raise TypeError(f"Each tag must be non-empty string, got {type(t).__name__}: {t!r}")
+
+        if type(self.description) is not str:
+            raise TypeError(f"Edit description must be string, got {type(self.description).__name__}")
+
+        if type(self.creator) is not str or not self.creator.strip():
+            raise TypeError(f"Edit creator must be non-empty string, got {type(self.creator).__name__}: {self.creator!r}")
+
+        if type(self.poster) is not str or not self.poster.strip():
+            raise TypeError(f"Edit poster must be non-empty string, got {type(self.poster).__name__}: {self.poster!r}")
+
+        if type(self.source) is not str or not self.source.strip():
+            raise TypeError(f"Edit source must be non-empty string, got {type(self.source).__name__}: {self.source!r}")
+
+        if type(self.duration) is not str or not self.duration.strip():
+            raise TypeError(f"Edit duration must be non-empty string, got {type(self.duration).__name__}: {self.duration!r}")
+
+        if type(self.duration_ms) is not int or self.duration_ms <= 0:
+            raise TypeError(f"duration_ms must be positive integer, got {type(self.duration_ms).__name__}: {self.duration_ms!r}")
+
+        if (not isinstance(self.duration_sec, (int, float))) or isinstance(self.duration_sec, bool) or self.duration_sec <= 0:
+            raise TypeError(f"duration_sec must be positive float/int, got {type(self.duration_sec).__name__}: {self.duration_sec!r}")
+
+        if type(self.trending) is not bool:
+            raise TypeError(f"trending must be boolean, got {type(self.trending).__name__}: {self.trending!r}")
 
 
 @dataclass(frozen=True)
@@ -41,15 +71,17 @@ class WatchHistoryEntry:
     occurred_at: str  # ISO 8601 UTC timestamp
 
     def __post_init__(self) -> None:
-        if not isinstance(self.edit_id, int) or self.edit_id < 0:
-            raise ValueError(f"edit_id must be non-negative integer, got {self.edit_id}")
-        if not isinstance(self.unique_watch_ms, int) or self.unique_watch_ms < 0:
-            raise ValueError(f"unique_watch_ms must be non-negative integer, got {self.unique_watch_ms}")
+        if type(self.edit_id) is not int or self.edit_id < 0:
+            raise TypeError(f"edit_id must be strict non-negative integer, got {type(self.edit_id).__name__}: {self.edit_id!r}")
+        if type(self.unique_watch_ms) is not int or self.unique_watch_ms < 0:
+            raise TypeError(f"unique_watch_ms must be non-negative integer, got {type(self.unique_watch_ms).__name__}: {self.unique_watch_ms!r}")
+        if type(self.occurred_at) is not str or not self.occurred_at.strip():
+            raise TypeError(f"occurred_at must be non-empty string, got {type(self.occurred_at).__name__}: {self.occurred_at!r}")
 
 
 @dataclass(frozen=True)
 class RecommendationRequest:
-    """Parameters for a recommendation request."""
+    """Strictly validated parameters for a recommendation request."""
 
     surface: str  # "home" or "up_next"
     current_edit_id: Optional[int] = None
@@ -60,15 +92,35 @@ class RecommendationRequest:
 
     def __post_init__(self) -> None:
         if self.surface not in ("home", "up_next"):
-            raise ValueError(f"surface must be 'home' or 'up_next', got '{self.surface}'")
-        if self.surface == "up_next" and self.current_edit_id is None:
-            raise ValueError("current_edit_id is required when surface is 'up_next'")
-        if self.current_edit_id is not None and (
-            not isinstance(self.current_edit_id, int) or self.current_edit_id < 0
-        ):
-            raise ValueError(f"current_edit_id must be non-negative integer, got {self.current_edit_id}")
-        if not isinstance(self.limit, int) or self.limit < 1:
-            raise ValueError(f"limit must be integer >= 1, got {self.limit}")
+            raise ValueError(f"surface must be 'home' or 'up_next', got {self.surface!r}")
+
+        if self.surface == "up_next":
+            if self.current_edit_id is None:
+                raise ValueError("current_edit_id is required when surface is 'up_next'")
+            if type(self.current_edit_id) is not int or self.current_edit_id < 0:
+                raise TypeError(f"current_edit_id must be non-negative integer, got {type(self.current_edit_id).__name__}: {self.current_edit_id!r}")
+        elif self.surface == "home" and self.current_edit_id is not None:
+            if type(self.current_edit_id) is not int or self.current_edit_id < 0:
+                raise TypeError(f"current_edit_id must be non-negative integer or None for home, got {type(self.current_edit_id).__name__}: {self.current_edit_id!r}")
+
+        if type(self.limit) is not int or self.limit < 1 or self.limit > 50:
+            raise ValueError(f"limit must be integer between 1 and 50, got {type(self.limit).__name__}: {self.limit!r}")
+
+        if not isinstance(self.exclude_edit_ids, (tuple, list)):
+            raise TypeError(f"exclude_edit_ids must be a sequence of integers, got {type(self.exclude_edit_ids).__name__}")
+        for eid in self.exclude_edit_ids:
+            if type(eid) is not int or eid < 0:
+                raise TypeError(f"exclude_edit_ids elements must be non-negative integers, got {type(eid).__name__}: {eid!r}")
+
+        if not isinstance(self.history, (tuple, list)):
+            raise TypeError(f"history must be a sequence of WatchHistoryEntry, got {type(self.history).__name__}")
+        for h in self.history:
+            if not isinstance(h, WatchHistoryEntry):
+                raise TypeError(f"history elements must be WatchHistoryEntry instances, got {type(h).__name__}: {h!r}")
+
+        if self.category_filter is not None:
+            if type(self.category_filter) is not str or not self.category_filter.strip():
+                raise TypeError(f"category_filter must be non-empty string or None, got {type(self.category_filter).__name__}: {self.category_filter!r}")
 
 
 @dataclass(frozen=True)

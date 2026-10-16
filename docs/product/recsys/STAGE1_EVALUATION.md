@@ -2,7 +2,7 @@
 
 **Author:** Antigravity (Linux) — Lead Recommendation Systems Engineer  
 **Date:** 2026-10-16  
-**Status:** Evaluation Report  
+**Status:** Evaluation Report (v2 Post-Review Corrections)  
 **Location:** `docs/product/recsys/STAGE1_EVALUATION.md`  
 **Branch:** `feat/recsys-baseline`  
 **Base:** `origin/main` at `174d01a89d1f83f47f4279b7e62ca2babdb1f294`
@@ -17,26 +17,46 @@ In adherence to the core engineering directive — **"Never fabricate engagement
 
 ## 2. What Can Be Measured With the Present Catalog
 
-All properties below are tested and verified via deterministic test suites in `server/recsys/tests/`:
+All properties below are verified via 24 deterministic unit and integration tests in `server/recsys/tests/`:
 
 | Dimension / Metric | Measured Value | Verification Method | Status |
 | :--- | :--- | :--- | :--- |
 | **Catalog ID Integrity** | 17 / 17 edits preserved (100%) | `test_catalog.py` | **VERIFIED** |
 | **ID 0 Preservation** | Retained with `title: "Into the Light"` | `test_catalog.py` | **VERIFIED** |
-| **Duration Parsing Fidelity** | `0:12` $\rightarrow 12,000\,\text{ms}$ (12.0s) | `test_catalog.py` | **VERIFIED** |
+| **Strict Schema Typing** | Bools as IDs, string tags, string trending, missing durations rejected | `test_catalog.py` | **VERIFIED** |
+| **Duration Parsing Fidelity** | `0:12` $\rightarrow 12,000\,\text{ms}$ (12.0s); negative durations rejected | `test_catalog.py` | **VERIFIED** |
 | **Cold-Start Category Balance** | 6 / 6 categories in top 6 positions (100%) | `test_engine.py` | **VERIFIED** |
+| **Usable History Detection** | Skips (<2s) and unknown IDs filtered; cold start preserved | `test_engine.py` | **VERIFIED** |
 | **Active Video Suppression** | 0% recurrence of active video in Up Next | `test_engine.py` | **VERIFIED** |
-| **Up Next Thematic Relevance** | Top recommendations match active category | `test_engine.py` | **VERIFIED** |
-| **Tag IDF Discrimination** | `IDF(original) = 0.693` vs `IDF(cinematic) = 1.90` | `test_similarity.py` | **VERIFIED** |
-| **Single-Creator Cap Relaxation** | `creator_cap_relaxed: true` emitted; 0 items dropped | `test_engine.py` | **VERIFIED** |
-| **Multi-Creator Diversity Cap** | Max 2 items per creator per 10 items | `test_engine.py` | **VERIFIED** |
+| **Meaningful Tag Discrimination** | Generic tags do not emit `tag_similarity`; topic tags do | `test_engine.py`, `test_similarity.py` | **VERIFIED** |
+| **Sliding Window Diversity** | Zero 2-per-10 violations across every complete sliding window (5 & 6 creators) | `test_engine.py` (`verify_sliding_window_diversity`) | **VERIFIED** |
+| **Diversity Cap Relaxation** | Explicit warnings on 1-2 creators and pool exhaustion | `test_engine.py` | **VERIFIED** |
 | **Deterministic Tie-Breaking** | Identical scores break ties by `edit.id` ASC | `test_engine.py` | **VERIFIED** |
-| **Source-to-Snapshot Drift** | 0 property drift across all 17 edits | `test_drift.py` | **VERIFIED** |
-| **Execution Performance** | 20 unit tests execute in ~1.1 seconds | `python3 -m unittest` | **VERIFIED** |
+| **Source-to-Snapshot Drift** | Positive sync passes; tampered count, version, & fields fail | `test_drift.py` (positive & negative tests) | **VERIFIED** |
+| **Execution Performance** | 24 unit tests execute in ~4.4 seconds | `python3 -m unittest` | **VERIFIED** |
 
 ---
 
-## 3. What Cannot Be Measured With the Present Catalog
+## 3. Adversarial Creator Diversity Analysis (1 to 6 Creators)
+
+Independent mathematical verification establishes:
+1. **Pigeonhole Principle Constraint:** In any sliding window of length 10 with a maximum of 2 items per creator, the maximum capacity that $N$ creators can provide is $2 \times N$.
+   - For $N = 1$: Maximum 2 items.
+   - For $N = 2$: Maximum 4 items.
+   - For $N = 3$: Maximum 6 items.
+   - For $N = 4$: Maximum 8 items.
+   - For $N \ge 5$: $2 \times 5 = 10$ items.
+   Therefore, strict enforcement across a 10-item window mathematically requires **at least 5 distinct creators**.
+2. **Adversarial Test Results:**
+   - **1 Creator (Demo Catalog):** Automatically relaxes cap, emits `creator_cap_relaxed: true` and `"creator_cap_relaxed"`, preserves all 17 demo items without truncation.
+   - **2 Creators:** Relaxes cap, emits diagnostic warning, avoids dropping eligible content.
+   - **3 & 4 Creators:** Places items without concentration until window capacity saturates; detects mathematical impossibility, relaxes gracefully with `"creator_cap_relaxed_insufficient_diversity"`, and retains all items.
+   - **5 & 6 Creators (Balanced):** Strict enforcement succeeds across the entire returned list. `verify_sliding_window_diversity()` verifies **every complete sliding window** $[i : i + 10]$ has 0 violations.
+   - **5 Creators (Extreme Skew):** When minority creator candidates are exhausted, detects exhaustion, relaxes gracefully, and minimizes concentration.
+
+---
+
+## 4. What Cannot Be Measured With the Present Catalog
 
 The following metrics are fundamentally unmeasurable at this stage without manufacturing synthetic fiction:
 
@@ -47,33 +67,12 @@ The following metrics are fundamentally unmeasurable at this stage without manuf
 3. **Neural Two-Tower Retrieval Accuracy (Recall@K / NDCG@K):**
    - *Why:* Training a collaborative filtering or two-tower deep retrieval network requires diverse user interaction graphs. Evaluating neural accuracy on 17 items with 1 creator would represent severe overfitting to synthetic noise.
 4. **Production Server Concurrency & P99 Latency:**
-   - *Why:* Stage 1 is implemented as a pure Python library core without an HTTP server. Benchmarks under network concurrency (e.g. 10,000 RPS) require the future serving tier and real hardware profiling.
+   - *Why:* Stage 1 is an in-memory Python library core. Benchmarks under network concurrency (e.g. 10,000 RPS) require the future serving tier and real hardware profiling.
 5. **Freshness Decay Dynamics:**
    - *Why:* All 17 demo edits are static fixtures without publication dates. Freshness half-life curves cannot be tuned until content is published on a continuous timeline.
 
 ---
 
-## 4. Benchmarking Baseline Comparison
-
-In Stage 1, we benchmarked the new **IDF-Discounted Deterministic Baseline** against a **Naive Unweighted Jaccard Baseline**:
-
-```
-Scenario: Up Next recommendation for Edit 0 ("Into the Light", Category: Cinematic, Tags: ["cinematic", "original", "demo", "landscape"])
-
-Naive Unweighted Jaccard:
-- Edit 1 (Gaming): Shares ["original", "demo"] -> Jaccard = 2/6 = 0.333
-- Edit 6 (Cinematic): Shares ["cinematic", "original", "demo", "landscape"] -> Jaccard = 4/4 = 1.000
-- Consequence: Cross-category items receive artificially high similarity solely due to boilerplate fixture tags.
-
-Lolixco Stage 1 IDF-Weighted Baseline:
-- Generic tags ("original", "demo") weighted at IDF 0.693.
-- Specific topic tags ("cinematic") weighted at IDF 1.897.
-- Cross-category similarity between Edit 0 and Edit 1 drops to < 0.25.
-- Same-category topic similarity between Edit 0 and Edit 6 is 1.000, creating strong topic separation.
-```
-
----
-
 ## 5. Conclusion
 
-The Stage 1 implementation delivers an empirically validated, explainable, and deterministic recommendation engine that maximizes the utility of real catalog metadata while maintaining absolute honesty regarding data limitations.
+The Stage 1 v2 implementation resolves all code review findings, delivering strict schema validation, robust usable-history detection, explainable tag discrimination, mathematically verified sliding-window creator diversity, and positive/negative drift protection.

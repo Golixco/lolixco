@@ -1,16 +1,48 @@
 import math
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .catalog import Catalog
 from .types import EditItem, WatchHistoryEntry
+
+# Canonical boilerplate fixture tags that appear across the vast majority of demo items
+BOILERPLATE_TAGS: Set[str] = {"original", "demo"}
+
+
+def is_distinctive_tag(tag: str, catalog: Catalog, max_df_ratio: float = 0.50) -> bool:
+    """
+    Determine if a tag is informative/distinctive.
+    A tag is non-distinctive if it appears in >= max_df_ratio of the catalog
+    or is explicitly in BOILERPLATE_TAGS.
+    """
+    clean_tag = tag.lower().strip()
+    if clean_tag in BOILERPLATE_TAGS:
+        return False
+    df = catalog.get_tag_doc_freq(clean_tag)
+    return df < (len(catalog) * max_df_ratio)
+
+
+def get_meaningful_shared_tags(
+    tags_a: Sequence[str],
+    tags_b: Sequence[str],
+    catalog: Catalog,
+    max_df_ratio: float = 0.50,
+) -> Set[str]:
+    """
+    Return the subset of overlapping tags between A and B that are genuinely
+    informative and non-boilerplate (e.g. specific genre or theme tags).
+    """
+    set_a = {t.lower().strip() for t in tags_a if t.strip()}
+    set_b = {t.lower().strip() for t in tags_b if t.strip()}
+    shared = set_a & set_b
+    return {t for t in shared if is_distinctive_tag(t, catalog, max_df_ratio)}
 
 
 def compute_tag_idf(catalog: Catalog) -> Dict[str, float]:
     """
     Compute Inverse Document Frequency (IDF) for all unique tags in the catalog.
     IDF(t) = ln(1.0 + N / DF(t))
-    This naturally downweights ubiquitous demo tags (e.g. 'original', 'demo')
-    relative to highly specific topic tags.
+    Boilerplate tags ('original', 'demo') receive a fixed near-zero weight (0.01)
+    to completely prevent boilerplate overlap from inflating similarity scores.
     """
     n = len(catalog)
     idf_table: Dict[str, float] = {}
@@ -19,8 +51,11 @@ def compute_tag_idf(catalog: Catalog) -> Dict[str, float]:
         for tag in item.tags:
             tag_clean = tag.lower().strip()
             if tag_clean and tag_clean not in idf_table:
-                df = catalog.get_tag_doc_freq(tag_clean)
-                idf_table[tag_clean] = math.log(1.0 + (n / max(df, 1)))
+                if tag_clean in BOILERPLATE_TAGS:
+                    idf_table[tag_clean] = 0.01
+                else:
+                    df = catalog.get_tag_doc_freq(tag_clean)
+                    idf_table[tag_clean] = math.log(1.0 + (n / max(df, 1)))
 
     return idf_table
 
@@ -64,37 +99,53 @@ def category_match_score(cat_a: str, cat_b: str) -> float:
     return 1.0 if cat_a.strip().lower() == cat_b.strip().lower() else 0.0
 
 
+def get_usable_history(
+    history: Sequence[WatchHistoryEntry],
+    catalog: Catalog,
+    min_watch_ms: int = 2000,
+) -> Tuple[List[WatchHistoryEntry], int]:
+    """
+    Validate and extract usable session history entries:
+    - Entry must reference a known edit in the catalog.
+    - User must have watched at least min_watch_ms (default 2000ms) to avoid bounces/skips.
+    Returns (usable_entries, ignored_count).
+    """
+    usable: List[WatchHistoryEntry] = []
+    ignored = 0
+    for entry in history:
+        item = catalog.get(entry.edit_id)
+        if item is None or entry.unique_watch_ms < min_watch_ms:
+            ignored += 1
+        else:
+            usable.append(entry)
+    return usable, ignored
+
+
 def compute_session_history_affinity(
     candidate: EditItem,
-    history: Sequence[WatchHistoryEntry],
+    usable_history: Sequence[WatchHistoryEntry],
     catalog: Catalog,
     idf_table: Dict[str, float],
 ) -> float:
     """
-    Calculate contextual affinity between a candidate edit and recent watch history.
+    Calculate contextual affinity between a candidate edit and validated usable watch history.
     - Clamps watch time to candidate/history duration and the 60s budget cap.
-    - Treats watches < 2s as quick skips (zero weight).
     - Applies gentle recency decay (0.90^k from newest to oldest).
     Returns a normalized affinity score in [0.0, 1.0].
     """
-    if not history:
+    if not usable_history:
         return 0.0
 
     total_weight = 0.0
     weighted_similarity = 0.0
 
-    # History ordered oldest to newest; traverse in reverse (newest first)
-    for idx, entry in enumerate(reversed(history)):
+    # Traverse in reverse (newest first)
+    for idx, entry in enumerate(reversed(usable_history)):
         hist_item = catalog.get(entry.edit_id)
         if not hist_item:
             continue
 
         raw_watch_sec = entry.unique_watch_ms / 1000.0
-        # If user watched less than 2 seconds, treat as bounce / non-positive signal
-        if raw_watch_sec < 2.0:
-            continue
-
-        # Budget-capped watch time fraction: min(w, d, 60) / 60
         capped_sec = min(raw_watch_sec, hist_item.duration_sec, 60.0)
         watch_budget_fraction = capped_sec / 60.0
 

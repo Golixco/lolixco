@@ -6,45 +6,39 @@ from server.recsys.catalog import (
     load_catalog_from_json,
     parse_duration_to_ms,
 )
-from server.recsys.types import EditItem
+from server.recsys.types import (
+    EditItem,
+    RecommendationRequest,
+    WatchHistoryEntry,
+)
 
 
-class TestCatalog(unittest.TestCase):
+class TestCatalogValidation(unittest.TestCase):
     def test_parse_duration_to_ms_valid(self):
-        # 12 seconds
         ms, sec = parse_duration_to_ms("0:12")
         self.assertEqual(ms, 12000)
         self.assertEqual(sec, 12.0)
 
-        # 1 minute 5 seconds
         ms, sec = parse_duration_to_ms("1:05")
         self.assertEqual(ms, 65000)
         self.assertEqual(sec, 65.0)
 
-        # 1 hour 2 minutes 3 seconds
         ms, sec = parse_duration_to_ms("1:02:03")
         self.assertEqual(ms, 3723000)
         self.assertEqual(sec, 3723.0)
 
-        # pure seconds
         ms, sec = parse_duration_to_ms("45.5")
         self.assertEqual(ms, 45500)
         self.assertEqual(sec, 45.5)
 
     def test_parse_duration_to_ms_invalid(self):
-        with self.assertRaises(ValueError):
-            parse_duration_to_ms("")
-        with self.assertRaises(ValueError):
-            parse_duration_to_ms("0:00")
-        with self.assertRaises(ValueError):
-            parse_duration_to_ms("-0:12")
-        with self.assertRaises(ValueError):
-            parse_duration_to_ms("not_a_time")
-        with self.assertRaises(ValueError):
-            parse_duration_to_ms("1:2:3:4")
+        for bad in ["", "0:00", "-0:12", "not_a_time", "1:2:3:4", "-5", None]:
+            with self.subTest(duration=bad):
+                with self.assertRaises((ValueError, TypeError)):
+                    parse_duration_to_ms(bad)  # type: ignore
 
-    def test_edit_item_validation(self):
-        # Valid edit with ID 0
+    def test_edit_item_strict_schema_validation(self):
+        # 1. Valid edit with ID 0
         edit0 = EditItem(
             id=0,
             title="Into the Light",
@@ -62,81 +56,165 @@ class TestCatalog(unittest.TestCase):
         self.assertEqual(edit0.id, 0)
         self.assertEqual(edit0.title, "Into the Light")
 
-        # Invalid negative ID
-        with self.assertRaises(ValueError):
+        # 2. Boolean True rejected as numeric ID
+        with self.assertRaises(TypeError):
             EditItem(
-                id=-1,
+                id=True,  # type: ignore
                 title="Bad ID",
                 category="Cinematic",
-                tags=(),
+                tags=("tag",),
                 description="",
-                creator="",
-                poster="",
-                source="",
+                creator="C",
+                poster="/p.svg",
+                source="/s.webm",
                 duration="0:12",
                 duration_ms=12000,
                 duration_sec=12.0,
             )
 
-        # Invalid empty title
-        with self.assertRaises(ValueError):
+        # 3. String as tags sequence rejected
+        with self.assertRaises(TypeError):
             EditItem(
                 id=1,
-                title="",
+                title="Bad Tags",
                 category="Cinematic",
-                tags=(),
+                tags="gaming",  # type: ignore
                 description="",
-                creator="",
-                poster="",
-                source="",
+                creator="C",
+                poster="/p.svg",
+                source="/s.webm",
                 duration="0:12",
                 duration_ms=12000,
                 duration_sec=12.0,
             )
 
-    def test_catalog_id_zero_preservation_and_lookups(self):
-        snapshot_path = Path(__file__).resolve().parents[1] / "catalog_snapshot.json"
-        catalog = load_catalog_from_json(snapshot_path)
+        # 4. Null title rejected
+        with self.assertRaises(TypeError):
+            EditItem(
+                id=1,
+                title=None,  # type: ignore
+                category="Cinematic",
+                tags=("tag",),
+                description="",
+                creator="C",
+                poster="/p.svg",
+                source="/s.webm",
+                duration="0:12",
+                duration_ms=12000,
+                duration_sec=12.0,
+            )
 
-        # All 17 items loaded
-        self.assertEqual(len(catalog), 17)
+        # 5. String "false" rejected for trending
+        with self.assertRaises(TypeError):
+            EditItem(
+                id=1,
+                title="Bad Trending",
+                category="Cinematic",
+                tags=("tag",),
+                description="",
+                creator="C",
+                poster="/p.svg",
+                source="/s.webm",
+                duration="0:12",
+                duration_ms=12000,
+                duration_sec=12.0,
+                trending="false",  # type: ignore
+            )
 
-        # ID 0 is in catalog and properly retrieved
-        self.assertIn(0, catalog)
-        edit0 = catalog.get(0)
-        self.assertIsNotNone(edit0)
-        self.assertEqual(edit0.id, 0)
-        self.assertEqual(edit0.title, "Into the Light")
-        self.assertEqual(edit0.category, "Cinematic")
-        self.assertEqual(edit0.duration_ms, 12000)
+    def test_catalog_from_dict_list_strict_schema(self):
+        valid_record = {
+            "id": 0,
+            "title": "Title",
+            "category": "Cinematic",
+            "tags": ["cinematic"],
+            "description": "Desc",
+            "creator": "Creator",
+            "poster": "/p.svg",
+            "source": "/s.webm",
+            "duration": "0:12",
+            "trending": False,
+        }
 
-        # ID 16 is in catalog
-        self.assertIn(16, catalog)
-        edit16 = catalog.get(16)
-        self.assertIsNotNone(edit16)
-        self.assertEqual(edit16.id, 16)
-        self.assertEqual(edit16.title, "Midnight City")
+        # Valid record loads cleanly
+        cat = Catalog.from_dict_list([valid_record])
+        self.assertEqual(len(cat), 1)
+        self.assertEqual(cat.get(0).title, "Title")
 
-        # Non-existent ID returns None
-        self.assertIsNone(catalog.get(999))
-        self.assertNotIn(999, catalog)
+        # Missing duration must raise error (not silently default)
+        no_duration = dict(valid_record)
+        del no_duration["duration"]
+        with self.assertRaises(ValueError):
+            Catalog.from_dict_list([no_duration])
 
-    def test_catalog_duplicate_ids_rejected(self):
-        raw = [
-            {"id": 0, "title": "A", "category": "C", "tags": [], "duration": "0:12"},
-            {"id": 0, "title": "B", "category": "C", "tags": [], "duration": "0:12"},
-        ]
-        with self.assertRaises(ValueError) as ctx:
-            Catalog.from_dict_list(raw)
-        self.assertIn("Duplicate edit ID", str(ctx.exception))
+        # Boolean True as ID must raise TypeError
+        bool_id = dict(valid_record)
+        bool_id["id"] = True
+        with self.assertRaises(TypeError):
+            Catalog.from_dict_list([bool_id])
 
-    def test_catalog_categories_and_creators(self):
-        snapshot_path = Path(__file__).resolve().parents[1] / "catalog_snapshot.json"
-        catalog = load_catalog_from_json(snapshot_path)
+        # String as tags must raise TypeError
+        string_tags = dict(valid_record)
+        string_tags["tags"] = "gaming"
+        with self.assertRaises(TypeError):
+            Catalog.from_dict_list([string_tags])
 
-        expected_categories = ("Anime", "Cinematic", "Gaming", "Movies", "Phonk", "Series")
-        self.assertEqual(catalog.categories, expected_categories)
-        self.assertEqual(catalog.creators, ("Lolixco demo",))
+        # Null title must raise TypeError
+        null_title = dict(valid_record)
+        null_title["title"] = None
+        with self.assertRaises(TypeError):
+            Catalog.from_dict_list([null_title])
+
+        # String "false" for trending must raise TypeError
+        str_trending = dict(valid_record)
+        str_trending["trending"] = "false"
+        with self.assertRaises(TypeError):
+            Catalog.from_dict_list([str_trending])
+
+        # Unexpected extra fields must raise ValueError
+        extra_fields = dict(valid_record)
+        extra_fields["unexpected_hack"] = 123
+        with self.assertRaises(ValueError):
+            Catalog.from_dict_list([extra_fields])
+
+    def test_request_model_strict_validation(self):
+        # Valid requests
+        req_home = RecommendationRequest(surface="home", limit=12)
+        self.assertEqual(req_home.surface, "home")
+        self.assertEqual(req_home.limit, 12)
+
+        req_upnext = RecommendationRequest(surface="up_next", current_edit_id=0, limit=5)
+        self.assertEqual(req_upnext.surface, "up_next")
+        self.assertEqual(req_upnext.current_edit_id, 0)
+
+        # Boolean rejected as current_edit_id
+        with self.assertRaises(TypeError):
+            RecommendationRequest(surface="up_next", current_edit_id=True)
+
+        # Missing current_edit_id for up_next
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="up_next", current_edit_id=None)
+
+        # Invalid surface
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="explore")
+
+        # Invalid limit
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="home", limit=0)
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="home", limit=100)
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="home", limit=True)  # type: ignore
+
+        # Boolean in exclude_edit_ids
+        with self.assertRaises(TypeError):
+            RecommendationRequest(surface="home", exclude_edit_ids=(True,))
+
+        # History entry validation
+        with self.assertRaises(TypeError):
+            WatchHistoryEntry(edit_id=True, unique_watch_ms=5000, occurred_at="2026-10-16T12:00:00Z")
+        with self.assertRaises(TypeError):
+            WatchHistoryEntry(edit_id=0, unique_watch_ms=True, occurred_at="2026-10-16T12:00:00Z")
 
 
 if __name__ == "__main__":

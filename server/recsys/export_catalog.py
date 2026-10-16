@@ -80,9 +80,46 @@ def sync_catalog(repo_root: Path, output_file: Path) -> Dict[str, Any]:
     return payload
 
 
-def check_catalog_drift(repo_root: Path, snapshot_path: Path) -> Tuple[bool, List[str]]:
+ALLOWED_ENVELOPE_KEYS = {"catalog_version", "total_edits", "edits", "exported_at"}
+REQUIRED_ENVELOPE_KEYS = {"catalog_version", "total_edits", "edits"}
+
+ALLOWED_RECORD_FIELDS = {
+    "id",
+    "title",
+    "category",
+    "tags",
+    "description",
+    "creator",
+    "poster",
+    "source",
+    "duration",
+    "trending",
+}
+REQUIRED_RECORD_FIELDS = {
+    "id",
+    "title",
+    "category",
+    "tags",
+    "description",
+    "creator",
+    "poster",
+    "source",
+    "duration",
+}
+
+
+def check_catalog_drift(
+    repo_root: Path, snapshot_path: Path, expected_version: str = "demo-catalog-v1"
+) -> Tuple[bool, List[str]]:
     """
     Compare snapshot file against active TypeScript source.
+    Validates:
+    - File existence and valid JSON.
+    - Envelope keys and catalog_version.
+    - Consistency of total_edits with actual records count.
+    - Count match with active live TypeScript source.
+    - Canonical record schema (unexpected fields, missing fields, type correctness).
+    - Exact property values between live source and snapshot.
     Returns (is_synced, diff_reasons).
     """
     if not snapshot_path.is_file():
@@ -94,23 +131,75 @@ def check_catalog_drift(repo_root: Path, snapshot_path: Path) -> Tuple[bool, Lis
         except Exception as e:
             return False, [f"Corrupt snapshot JSON: {e}"]
 
+    diffs: List[str] = []
+
+    if not isinstance(snapshot_data, dict):
+        return False, [f"Snapshot root must be JSON object, got {type(snapshot_data).__name__}"]
+
+    # 1. Envelope validation
+    extra_env_keys = set(snapshot_data.keys()) - ALLOWED_ENVELOPE_KEYS
+    if extra_env_keys:
+        diffs.append(f"Unexpected snapshot envelope keys: {sorted(extra_env_keys)}")
+
+    missing_env_keys = REQUIRED_ENVELOPE_KEYS - set(snapshot_data.keys())
+    if missing_env_keys:
+        diffs.append(f"Missing required snapshot envelope keys: {sorted(missing_env_keys)}")
+
+    cat_version = snapshot_data.get("catalog_version")
+    if cat_version != expected_version:
+        diffs.append(
+            f"Catalog version mismatch: expected {expected_version!r}, got {cat_version!r}"
+        )
+
     snapshot_edits = snapshot_data.get("edits")
     if not isinstance(snapshot_edits, list):
-        return False, ["Snapshot missing 'edits' list"]
+        diffs.append(f"Snapshot missing valid 'edits' list, got {type(snapshot_edits).__name__}")
+        return False, diffs
 
+    total_edits_declared = snapshot_data.get("total_edits")
+    if total_edits_declared != len(snapshot_edits):
+        diffs.append(
+            f"Snapshot internal count mismatch: total_edits declared {total_edits_declared} != edits length {len(snapshot_edits)}"
+        )
+
+    # 2. Live source comparison
     try:
         live_edits = fetch_edits_from_source(repo_root)
     except Exception as e:
         return False, [f"Failed to fetch live edits: {e}"]
 
-    diffs: List[str] = []
     if len(live_edits) != len(snapshot_edits):
         diffs.append(
             f"Count mismatch: live has {len(live_edits)} edits, snapshot has {len(snapshot_edits)}"
         )
 
-    # Key comparison per item
-    snap_by_id = {e.get("id"): e for e in snapshot_edits if isinstance(e, dict)}
+    if total_edits_declared != len(live_edits):
+        diffs.append(
+            f"Live count vs snapshot declared count mismatch: live {len(live_edits)} vs total_edits {total_edits_declared}"
+        )
+
+    # 3. Schema & property-level validation
+    snap_by_id = {}
+    for idx, e in enumerate(snapshot_edits):
+        if not isinstance(e, dict):
+            diffs.append(f"Snapshot record at index {idx} is not a dictionary: {type(e).__name__}")
+            continue
+
+        raw_id = e.get("id")
+        if type(raw_id) is not int or raw_id < 0:
+            diffs.append(f"Snapshot record at index {idx} has invalid ID: {raw_id!r}")
+            continue
+
+        extra_record_keys = set(e.keys()) - ALLOWED_RECORD_FIELDS
+        if extra_record_keys:
+            diffs.append(f"Snapshot edit {raw_id} has unexpected extra fields: {sorted(extra_record_keys)}")
+
+        missing_record_keys = REQUIRED_RECORD_FIELDS - set(e.keys())
+        if missing_record_keys:
+            diffs.append(f"Snapshot edit {raw_id} missing required fields: {sorted(missing_record_keys)}")
+
+        snap_by_id[raw_id] = e
+
     live_by_id = {e.get("id"): e for e in live_edits if isinstance(e, dict)}
 
     missing_in_snap = set(live_by_id.keys()) - set(snap_by_id.keys())
@@ -121,7 +210,7 @@ def check_catalog_drift(repo_root: Path, snapshot_path: Path) -> Tuple[bool, Lis
     if missing_in_live:
         diffs.append(f"IDs in snapshot but missing in live: {sorted(missing_in_live)}")
 
-    # Property-level check
+    # Exact field-level equality check
     for item_id, live_item in live_by_id.items():
         if item_id in snap_by_id:
             snap_item = snap_by_id[item_id]

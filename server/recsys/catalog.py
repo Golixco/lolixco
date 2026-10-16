@@ -115,35 +115,132 @@ class Catalog:
     def get_tag_doc_freq(self, tag: str) -> int:
         return self._tag_doc_freq.get(tag.lower(), 0)
 
+    ALLOWED_FIELDS = {
+        "id",
+        "title",
+        "category",
+        "tags",
+        "description",
+        "creator",
+        "poster",
+        "source",
+        "duration",
+        "trending",
+    }
+    REQUIRED_FIELDS = {
+        "id",
+        "title",
+        "category",
+        "tags",
+        "description",
+        "creator",
+        "poster",
+        "source",
+        "duration",
+    }
+
     @classmethod
     def from_dict_list(
         cls, raw_list: Sequence[Dict[str, Any]], catalog_version: str = "demo-catalog-v1"
     ) -> "Catalog":
-        """Construct catalog from raw dictionaries (e.g. deserialized JSON)."""
+        """Construct catalog from raw dictionaries with strict schema and type validation."""
+        if not isinstance(raw_list, (list, tuple)):
+            raise TypeError(f"Expected list/tuple of dicts for catalog, got {type(raw_list).__name__}")
+
         items: List[EditItem] = []
-        for raw in raw_list:
-            raw_id = raw.get("id")
-            if raw_id is None or not isinstance(raw_id, int) or raw_id < 0:
-                raise ValueError(f"Invalid or missing id in raw record: {raw}")
+        for idx, raw in enumerate(raw_list):
+            if not isinstance(raw, dict):
+                raise TypeError(f"Record at index {idx} must be a dictionary, got {type(raw).__name__}")
 
-            duration_raw = raw.get("duration", "0:12")
-            dur_ms, dur_sec = parse_duration_to_ms(duration_raw)
+            extra_keys = set(raw.keys()) - cls.ALLOWED_FIELDS
+            if extra_keys:
+                raise ValueError(f"Record at index {idx} has unexpected fields: {sorted(extra_keys)}")
 
-            tags = tuple(str(t).strip().lower() for t in raw.get("tags", []))
+            missing_keys = cls.REQUIRED_FIELDS - set(raw.keys())
+            if missing_keys:
+                raise ValueError(f"Record at index {idx} missing required fields: {sorted(missing_keys)}")
+
+            raw_id = raw["id"]
+            if type(raw_id) is not int or raw_id < 0:
+                raise TypeError(
+                    f"Record at index {idx}: 'id' must be strict non-negative integer, got {type(raw_id).__name__}: {raw_id!r}"
+                )
+
+            raw_title = raw["title"]
+            if type(raw_title) is not str or not raw_title.strip():
+                raise TypeError(
+                    f"Record at index {idx}: 'title' must be non-empty string, got {type(raw_title).__name__}: {raw_title!r}"
+                )
+
+            raw_cat = raw["category"]
+            if type(raw_cat) is not str or not raw_cat.strip():
+                raise TypeError(
+                    f"Record at index {idx}: 'category' must be non-empty string, got {type(raw_cat).__name__}: {raw_cat!r}"
+                )
+
+            raw_tags = raw["tags"]
+            if not isinstance(raw_tags, (list, tuple)) or isinstance(raw_tags, (str, bytes)):
+                raise TypeError(
+                    f"Record at index {idx}: 'tags' must be a list/tuple of strings, got {type(raw_tags).__name__}: {raw_tags!r}"
+                )
+            cleaned_tags = []
+            for t_idx, t in enumerate(raw_tags):
+                if type(t) is not str or not t.strip():
+                    raise TypeError(
+                        f"Record at index {idx}, tag {t_idx}: must be non-empty string, got {type(t).__name__}: {t!r}"
+                    )
+                cleaned_tags.append(t.strip().lower())
+
+            raw_desc = raw["description"]
+            if type(raw_desc) is not str:
+                raise TypeError(
+                    f"Record at index {idx}: 'description' must be string, got {type(raw_desc).__name__}"
+                )
+
+            raw_creator = raw["creator"]
+            if type(raw_creator) is not str or not raw_creator.strip():
+                raise TypeError(
+                    f"Record at index {idx}: 'creator' must be non-empty string, got {type(raw_creator).__name__}: {raw_creator!r}"
+                )
+
+            raw_poster = raw["poster"]
+            if type(raw_poster) is not str or not raw_poster.strip():
+                raise TypeError(
+                    f"Record at index {idx}: 'poster' must be non-empty string, got {type(raw_poster).__name__}: {raw_poster!r}"
+                )
+
+            raw_source = raw["source"]
+            if type(raw_source) is not str or not raw_source.strip():
+                raise TypeError(
+                    f"Record at index {idx}: 'source' must be non-empty string, got {type(raw_source).__name__}: {raw_source!r}"
+                )
+
+            raw_duration = raw["duration"]
+            if type(raw_duration) is not str or not raw_duration.strip():
+                raise TypeError(
+                    f"Record at index {idx}: 'duration' must be non-empty string, got {type(raw_duration).__name__}: {raw_duration!r}"
+                )
+            dur_ms, dur_sec = parse_duration_to_ms(raw_duration)
+
+            raw_trending = raw.get("trending", False)
+            if type(raw_trending) is not bool:
+                raise TypeError(
+                    f"Record at index {idx}: 'trending' must be boolean, got {type(raw_trending).__name__}: {raw_trending!r}"
+                )
 
             item = EditItem(
                 id=raw_id,
-                title=str(raw.get("title", "")),
-                category=str(raw.get("category", "")),
-                tags=tags,
-                description=str(raw.get("description", "")),
-                creator=str(raw.get("creator", "")),
-                poster=str(raw.get("poster", "")),
-                source=str(raw.get("source", "")),
-                duration=str(duration_raw),
+                title=raw_title.strip(),
+                category=raw_cat.strip(),
+                tags=tuple(cleaned_tags),
+                description=raw_desc,
+                creator=raw_creator.strip(),
+                poster=raw_poster.strip(),
+                source=raw_source.strip(),
+                duration=raw_duration.strip(),
                 duration_ms=dur_ms,
                 duration_sec=dur_sec,
-                trending=bool(raw.get("trending", False)),
+                trending=raw_trending,
             )
             items.append(item)
 
