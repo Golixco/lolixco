@@ -364,7 +364,12 @@ class TestRecommendationEngine(unittest.TestCase):
         # With budget=1, it cannot complete the backtracking search and must flag budget exhaustion
         _, relaxed, warnings = self.engine._apply_creator_cap(ranked, max_per_window=2, window_size=10, budget=1)
         self.assertTrue(relaxed)
+        self.assertIn("creator_cap_relaxed", warnings)
         self.assertIn("creator_cap_relaxed_search_budget_exhausted", warnings)
+        # Search budget exhaustion on an otherwise feasible 5-creator sequence must NOT be conflated
+        # with insufficient diversity or proven infeasibility
+        self.assertNotIn("creator_cap_relaxed_insufficient_diversity", warnings)
+        self.assertNotIn("creator_cap_relaxed_proven_infeasible", warnings)
 
     def test_category_filter_rejection_and_empty_valid_filter(self):
         """Reject unknown category filters; handle valid categories with 0 items cleanly."""

@@ -5,6 +5,7 @@ name: Frontend CI
     branches:
       - main
       - feat/discovery-ui-search
+      - feat/recsys-baseline
   pull_request:
     branches:
       - main
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   validate:
-    name: Frontend Quality Checks
+    name: Frontend and Recsys Quality Checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -33,6 +34,11 @@ jobs:
           node-version: 24
           cache: 'pnpm'
 
+      - name: Setup Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -47,3 +53,9 @@ jobs:
 
       - name: Run production build
         run: pnpm build
+
+      - name: Run recommendation tests
+        run: python3 -m unittest discover -s server/recsys/tests -v
+
+      - name: Run catalog drift validation
+        run: python3 -m server.recsys.export_catalog --check

@@ -64,7 +64,7 @@ Independent mathematical verification establishes:
    - **3 & 4 Creators:** Places items without concentration until window capacity saturates; detects mathematical impossibility, relaxes gracefully with `"creator_cap_relaxed_proven_infeasible"`, and retains all items.
    - **5 & 6 Creators (Balanced):** Strict enforcement succeeds across the entire returned list. `verify_sliding_window_diversity()` verifies **every complete sliding window** $[i : i + 10]$ has 0 violations.
    - **5 Creators (Extreme Skew):** When minority creator candidates are exhausted, detects exhaustion, relaxes gracefully, and minimizes concentration.
-   - **Search Budget Exhaustion:** When bounded search budget is exhausted before finding a completion, explicitly reports `"creator_cap_relaxed_search_budget_exhausted"` rather than claiming proven infeasibility.
+   - **Search Budget Exhaustion:** When bounded search budget is exhausted before finding a completion, explicitly reports `"creator_cap_relaxed_search_budget_exhausted"` with feasibility undetermined, rather than claiming proven infeasibility or conflating it with insufficient diversity.
 
 ---
 

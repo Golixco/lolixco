@@ -124,7 +124,7 @@ For a candidate edit $i$ given currently watched edit $c$ and validated usable h
      - Feeds shorter than 10 items require no relaxation and emit `creator_cap_relaxed: False` with no warnings.
      - Feeds $\ge 10$ items with insufficient creators ($N \le 2$, such as long single-creator feeds): `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_proven_infeasible"`.
      - Proven infeasible ($N \in \{3, 4\}$ or skewed inventory): `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_proven_infeasible"`.
-     - Search budget exhausted: `"creator_cap_relaxed"`, `"creator_cap_relaxed_insufficient_diversity"`, `"creator_cap_relaxed_search_budget_exhausted"`.
+     - Search budget exhausted (feasibility undetermined): `"creator_cap_relaxed"`, `"creator_cap_relaxed_search_budget_exhausted"` (without claiming insufficient diversity).
      - In all relaxed cases, remaining candidates are placed to minimize creator concentration without dropping content.
   6. **Verification:** `verify_sliding_window_diversity()` inspects every complete sliding window $[i : i + 10]$ in the returned list.
 

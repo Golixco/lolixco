@@ -434,10 +434,10 @@ class RecommendationEngine:
                 fallback_result.append(remaining.pop(best_idx))
 
         warnings.append("creator_cap_relaxed")
-        warnings.append("creator_cap_relaxed_insufficient_diversity")
         if budget_exhausted:
             warnings.append("creator_cap_relaxed_search_budget_exhausted")
         else:
+            warnings.append("creator_cap_relaxed_insufficient_diversity")
             warnings.append("creator_cap_relaxed_proven_infeasible")
 
         return fallback_result, True, sorted(list(set(warnings)))
