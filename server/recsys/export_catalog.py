@@ -157,7 +157,11 @@ def check_catalog_drift(
         return False, diffs
 
     total_edits_declared = snapshot_data.get("total_edits")
-    if total_edits_declared != len(snapshot_edits):
+    if type(total_edits_declared) is not int or total_edits_declared < 0:
+        diffs.append(
+            f"Snapshot 'total_edits' must be strict integer, got {type(total_edits_declared).__name__}: {total_edits_declared!r}"
+        )
+    elif total_edits_declared != len(snapshot_edits):
         diffs.append(
             f"Snapshot internal count mismatch: total_edits declared {total_edits_declared} != edits length {len(snapshot_edits)}"
         )
@@ -210,7 +214,7 @@ def check_catalog_drift(
     if missing_in_live:
         diffs.append(f"IDs in snapshot but missing in live: {sorted(missing_in_live)}")
 
-    # Exact field-level equality check
+    # Exact field-level equality and type check
     for item_id, live_item in live_by_id.items():
         if item_id in snap_by_id:
             snap_item = snap_by_id[item_id]
@@ -225,9 +229,17 @@ def check_catalog_drift(
                 "duration",
                 "trending",
             ]:
-                if live_item.get(field) != snap_item.get(field):
+                live_val = live_item.get(field)
+                snap_val = snap_item.get(field)
+                if live_val is None and snap_val is None:
+                    continue
+                if type(live_val) is not type(snap_val):
                     diffs.append(
-                        f"Item {item_id} field '{field}' drifted: live={live_item.get(field)!r} vs snapshot={snap_item.get(field)!r}"
+                        f"Item {item_id} field '{field}' type drifted: live type={type(live_val).__name__} vs snapshot type={type(snap_val).__name__} ({live_val!r} vs {snap_val!r})"
+                    )
+                elif live_val != snap_val:
+                    diffs.append(
+                        f"Item {item_id} field '{field}' drifted: live={live_val!r} vs snapshot={snap_val!r}"
                     )
 
     return (len(diffs) == 0), diffs

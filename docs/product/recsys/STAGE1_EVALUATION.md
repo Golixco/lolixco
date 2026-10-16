@@ -2,7 +2,7 @@
 
 **Author:** Antigravity (Linux) — Lead Recommendation Systems Engineer  
 **Date:** 2026-10-16  
-**Status:** Evaluation Report (v2 Post-Review Corrections)  
+**Status:** Evaluation Report (v3 Post-Review Corrections)  
 **Location:** `docs/product/recsys/STAGE1_EVALUATION.md`  
 **Branch:** `feat/recsys-baseline`  
 **Base:** `origin/main` at `174d01a89d1f83f47f4279b7e62ca2babdb1f294`
@@ -17,23 +17,28 @@ In adherence to the core engineering directive — **"Never fabricate engagement
 
 ## 2. What Can Be Measured With the Present Catalog
 
-All properties below are verified via 24 deterministic unit and integration tests in `server/recsys/tests/`:
+All properties below are verified via 31 deterministic unit and integration tests in `server/recsys/tests/`:
 
 | Dimension / Metric | Measured Value | Verification Method | Status |
 | :--- | :--- | :--- | :--- |
 | **Catalog ID Integrity** | 17 / 17 edits preserved (100%) | `test_catalog.py` | **VERIFIED** |
 | **ID 0 Preservation** | Retained with `title: "Into the Light"` | `test_catalog.py` | **VERIFIED** |
 | **Strict Schema Typing** | Bools as IDs, string tags, string trending, missing durations rejected | `test_catalog.py` | **VERIFIED** |
+| **Strict Envelope Loading** | List root, wrong version, extra keys, and count mismatches rejected | `test_catalog.py` | **VERIFIED** |
+| **Canonical Category Contract** | Rejects unknown category filters; handles zero-result valid filters cleanly | `test_catalog.py`, `test_engine.py` | **VERIFIED** |
 | **Duration Parsing Fidelity** | `0:12` $\rightarrow 12,000\,\text{ms}$ (12.0s); negative durations rejected | `test_catalog.py` | **VERIFIED** |
 | **Cold-Start Category Balance** | 6 / 6 categories in top 6 positions (100%) | `test_engine.py` | **VERIFIED** |
 | **Usable History Detection** | Skips (<2s) and unknown IDs filtered; cold start preserved | `test_engine.py` | **VERIFIED** |
+| **Honest Reason Telemetry** | No `category_balance` in history Home; `fallback_exploration` in Up Next | `test_engine.py` | **VERIFIED** |
 | **Active Video Suppression** | 0% recurrence of active video in Up Next | `test_engine.py` | **VERIFIED** |
 | **Meaningful Tag Discrimination** | Generic tags do not emit `tag_similarity`; topic tags do | `test_engine.py`, `test_similarity.py` | **VERIFIED** |
-| **Sliding Window Diversity** | Zero 2-per-10 violations across every complete sliding window (5 & 6 creators) | `test_engine.py` (`verify_sliding_window_diversity`) | **VERIFIED** |
+| **Adversarial Diversity Feasibility**| Solves adversarial `DDACBEECEABDABC` permutation with 0 window violations | `test_engine.py` (`verify_sliding_window_diversity`) | **VERIFIED** |
+| **Infeasibility vs Budget Exhaustion**| Explicitly distinguishes proven mathematical infeasibility from step limit | `test_engine.py` | **VERIFIED** |
 | **Diversity Cap Relaxation** | Explicit warnings on 1-2 creators and pool exhaustion | `test_engine.py` | **VERIFIED** |
 | **Deterministic Tie-Breaking** | Identical scores break ties by `edit.id` ASC | `test_engine.py` | **VERIFIED** |
 | **Source-to-Snapshot Drift** | Positive sync passes; tampered count, version, & fields fail | `test_drift.py` (positive & negative tests) | **VERIFIED** |
-| **Execution Performance** | 24 unit tests execute in ~4.4 seconds | `python3 -m unittest` | **VERIFIED** |
+| **Strict Drift Type Resistance**| Rejects `trending: 0` vs `false` and `total_edits: 17.0` vs `17` | `test_drift.py` (type bypass tests) | **VERIFIED** |
+| **Execution Performance** | 31 unit tests execute in ~5.5 seconds | `python3 -m unittest` | **VERIFIED** |
 
 ---
 
@@ -48,11 +53,13 @@ Independent mathematical verification establishes:
    - For $N \ge 5$: $2 \times 5 = 10$ items.
    Therefore, strict enforcement across a 10-item window mathematically requires **at least 5 distinct creators**.
 2. **Adversarial Test Results:**
+   - **Adversarial Permutation `DDACBEECEABDABC` (5 creators, 3 items each):** The bounded backtracking scheduler overcomes greedy local starvation to produce `DACBEDECABDACBE`. Every 10-item sliding window $[i : i + 10]$ satisfies $\le 2$ items per creator. No relaxation is triggered (`creator_cap_relaxed == False`).
    - **1 Creator (Demo Catalog):** Automatically relaxes cap, emits `creator_cap_relaxed: true` and `"creator_cap_relaxed"`, preserves all 17 demo items without truncation.
    - **2 Creators:** Relaxes cap, emits diagnostic warning, avoids dropping eligible content.
-   - **3 & 4 Creators:** Places items without concentration until window capacity saturates; detects mathematical impossibility, relaxes gracefully with `"creator_cap_relaxed_insufficient_diversity"`, and retains all items.
+   - **3 & 4 Creators:** Places items without concentration until window capacity saturates; detects mathematical impossibility, relaxes gracefully with `"creator_cap_relaxed_proven_infeasible"`, and retains all items.
    - **5 & 6 Creators (Balanced):** Strict enforcement succeeds across the entire returned list. `verify_sliding_window_diversity()` verifies **every complete sliding window** $[i : i + 10]$ has 0 violations.
    - **5 Creators (Extreme Skew):** When minority creator candidates are exhausted, detects exhaustion, relaxes gracefully, and minimizes concentration.
+   - **Search Budget Exhaustion:** When bounded search budget is exhausted before finding a completion, explicitly reports `"creator_cap_relaxed_search_budget_exhausted"` rather than claiming proven infeasibility.
 
 ---
 
@@ -75,4 +82,11 @@ The following metrics are fundamentally unmeasurable at this stage without manuf
 
 ## 5. Conclusion
 
-The Stage 1 v2 implementation resolves all code review findings, delivering strict schema validation, robust usable-history detection, explainable tag discrimination, mathematically verified sliding-window creator diversity, and positive/negative drift protection.
+The Stage 1 v3 implementation resolves all code review findings:
+- Bounded backtracking creator diversity scheduling solves adversarial feasibility (e.g. `DDACBEECEABDABC`).
+- Proven mathematical infeasibility is explicitly distinguished from search budget exhaustion.
+- Snapshot loading strictly validates envelope schema and version integrity.
+- Source-to-snapshot drift check enforces strict type matching (closing `trending: 0` and `total_edits: 17.0` loopholes).
+- Canonical category contracts explicitly reject unknown filters while cleanly handling zero-result valid queries.
+- Reason codes are strictly honest across Up Next and history-aware feeds.
+

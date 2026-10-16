@@ -247,8 +247,19 @@ class Catalog:
         return cls(items, catalog_version=catalog_version)
 
 
-def load_catalog_from_json(json_path: Path | str) -> Catalog:
-    """Load and validate catalog from a JSON snapshot file."""
+def load_catalog_from_json(
+    json_path: Path | str, expected_version: str = "demo-catalog-v1"
+) -> Catalog:
+    """
+    Load and validate catalog from a JSON snapshot file with strict envelope checks.
+    Enforces:
+    - JSON object root.
+    - Required envelope keys: catalog_version, total_edits, edits.
+    - No unexpected envelope keys (only catalog_version, total_edits, edits, exported_at).
+    - catalog_version matches expected_version.
+    - total_edits is strict integer and matches edits array length.
+    - edits is list of records validated via Catalog.from_dict_list.
+    """
     path = Path(json_path)
     if not path.is_file():
         raise FileNotFoundError(f"Catalog file not found: {path}")
@@ -256,13 +267,33 @@ def load_catalog_from_json(json_path: Path | str) -> Catalog:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
-    if isinstance(data, list):
-        return Catalog.from_dict_list(data)
-    elif isinstance(data, dict):
-        version = data.get("catalog_version", "demo-catalog-v1")
-        records = data.get("edits") or data.get("records") or data.get("items")
-        if not isinstance(records, list):
-            raise ValueError(f"JSON catalog dictionary missing records list: {data.keys()}")
-        return Catalog.from_dict_list(records, catalog_version=version)
-    else:
-        raise ValueError(f"Unsupported JSON root type: {type(data)}")
+    if not isinstance(data, dict):
+        raise TypeError(f"Catalog JSON root must be an object, got {type(data).__name__}")
+
+    allowed_envelope = {"catalog_version", "total_edits", "edits", "exported_at"}
+    required_envelope = {"catalog_version", "total_edits", "edits"}
+
+    extra_keys = set(data.keys()) - allowed_envelope
+    if extra_keys:
+        raise ValueError(f"Unexpected snapshot envelope keys: {sorted(extra_keys)}")
+
+    missing_keys = required_envelope - set(data.keys())
+    if missing_keys:
+        raise ValueError(f"Missing required snapshot envelope keys: {sorted(missing_keys)}")
+
+    version = data.get("catalog_version")
+    if type(version) is not str or version != expected_version:
+        raise ValueError(f"Catalog version mismatch: expected {expected_version!r}, got {version!r}")
+
+    total_edits = data.get("total_edits")
+    if type(total_edits) is not int or total_edits < 0:
+        raise TypeError(f"total_edits must be a non-negative integer, got {type(total_edits).__name__}: {total_edits!r}")
+
+    records = data.get("edits")
+    if not isinstance(records, list):
+        raise TypeError(f"'edits' must be a list of records, got {type(records).__name__}")
+
+    if total_edits != len(records):
+        raise ValueError(f"total_edits declared ({total_edits}) does not match edits length ({len(records)})")
+
+    return Catalog.from_dict_list(records, catalog_version=expected_version)

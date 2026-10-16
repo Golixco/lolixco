@@ -216,6 +216,121 @@ class TestCatalogValidation(unittest.TestCase):
         with self.assertRaises(TypeError):
             WatchHistoryEntry(edit_id=0, unique_watch_ms=True, occurred_at="2026-10-16T12:00:00Z")
 
+        # Category filter validation
+        req_valid_cat = RecommendationRequest(surface="home", category_filter="Cinematic")
+        self.assertEqual(req_valid_cat.category_filter, "Cinematic")
+
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="home", category_filter="UnknownCategory")
+        with self.assertRaises(TypeError):
+            RecommendationRequest(surface="home", category_filter=123)  # type: ignore
+
+    def test_load_catalog_from_json_strict_envelope(self):
+        import tempfile
+        import json
+
+        valid_payload = {
+            "catalog_version": "demo-catalog-v1",
+            "total_edits": 1,
+            "edits": [
+                {
+                    "id": 0,
+                    "title": "Title",
+                    "category": "Cinematic",
+                    "tags": ["cinematic"],
+                    "description": "Desc",
+                    "creator": "Creator",
+                    "poster": "/p.svg",
+                    "source": "/s.webm",
+                    "duration": "0:12",
+                    "trending": False,
+                }
+            ],
+        }
+
+        # 1. Valid snapshot loads cleanly
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(valid_payload, f)
+            temp_path = f.name
+
+        try:
+            cat = load_catalog_from_json(temp_path)
+            self.assertEqual(len(cat), 1)
+            self.assertEqual(cat.catalog_version, "demo-catalog-v1")
+        finally:
+            Path(temp_path).unlink()
+
+        # 2. Reject list root (old loose behavior)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(valid_payload["edits"], f)
+            temp_path = f.name
+        try:
+            with self.assertRaises(TypeError):
+                load_catalog_from_json(temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+        # 3. Reject unexpected envelope keys
+        bad_envelope = dict(valid_payload)
+        bad_envelope["unexpected_key"] = "malicious"
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(bad_envelope, f)
+            temp_path = f.name
+        try:
+            with self.assertRaises(ValueError):
+                load_catalog_from_json(temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+        # 4. Reject missing required envelope keys
+        missing_envelope = dict(valid_payload)
+        del missing_envelope["total_edits"]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(missing_envelope, f)
+            temp_path = f.name
+        try:
+            with self.assertRaises(ValueError):
+                load_catalog_from_json(temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+        # 5. Reject wrong catalog_version
+        wrong_ver = dict(valid_payload)
+        wrong_ver["catalog_version"] = "wrong-v2"
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(wrong_ver, f)
+            temp_path = f.name
+        try:
+            with self.assertRaises(ValueError):
+                load_catalog_from_json(temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+        # 6. Reject floating-point or non-integer total_edits
+        float_count = dict(valid_payload)
+        float_count["total_edits"] = 1.0
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(float_count, f)
+            temp_path = f.name
+        try:
+            with self.assertRaises(TypeError):
+                load_catalog_from_json(temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+        # 7. Reject total_edits count mismatch with edits array
+        count_mismatch = dict(valid_payload)
+        count_mismatch["total_edits"] = 99
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(count_mismatch, f)
+            temp_path = f.name
+        try:
+            with self.assertRaises(ValueError):
+                load_catalog_from_json(temp_path)
+        finally:
+            Path(temp_path).unlink()
+
 
 if __name__ == "__main__":
     unittest.main()
+

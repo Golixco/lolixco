@@ -79,6 +79,16 @@ class WatchHistoryEntry:
             raise TypeError(f"occurred_at must be non-empty string, got {type(self.occurred_at).__name__}: {self.occurred_at!r}")
 
 
+CANONICAL_CATEGORIES: tuple[str, ...] = (
+    "Cinematic",
+    "Gaming",
+    "Anime",
+    "Movies",
+    "Series",
+    "Phonk",
+)
+
+
 @dataclass(frozen=True)
 class RecommendationRequest:
     """Strictly validated parameters for a recommendation request."""
@@ -121,6 +131,10 @@ class RecommendationRequest:
         if self.category_filter is not None:
             if type(self.category_filter) is not str or not self.category_filter.strip():
                 raise TypeError(f"category_filter must be non-empty string or None, got {type(self.category_filter).__name__}: {self.category_filter!r}")
+            if self.category_filter not in CANONICAL_CATEGORIES:
+                raise ValueError(
+                    f"Unknown category_filter {self.category_filter!r}. Must be one of canonical categories: {CANONICAL_CATEGORIES}"
+                )
 
 
 @dataclass(frozen=True)

@@ -246,6 +246,137 @@ class TestRecommendationEngine(unittest.TestCase):
         self.assertEqual(len(resp.items), 0)
         self.assertEqual(resp.diagnostics.get("fallback_reason"), "empty_eligible_pool")
 
+    def test_adversarial_creator_diversity_feasibility(self):
+        """
+        Adversarial regression test:
+        5 creators: A, B, C, D, E (3 edits each).
+        Initial order: DDACBEECEABDABC (15 items).
+        A valid solution exists (e.g. DACBEDECABDACBE or ABCDEABCDEABCDE).
+        Engine must find a feasible ordering without relaxing the creator cap.
+        """
+        creator_seq = "DDACBEECEABDABC"
+        items = []
+        for idx, c in enumerate(creator_seq):
+            items.append(
+                EditItem(
+                    id=idx,
+                    title=f"Edit {idx}",
+                    category="Cinematic",
+                    tags=("cinematic", "film"),
+                    description="Adversarial item",
+                    creator=f"Creator_{c}",
+                    poster="/p.svg",
+                    source="/s.webm",
+                    duration="0:15",
+                    duration_ms=15000,
+                    duration_sec=15.0,
+                    trending=False,
+                )
+            )
+
+        cat = Catalog(items)
+        engine = RecommendationEngine(cat)
+        req = RecommendationRequest(surface="home", limit=15)
+        resp = engine.recommend(req)
+
+        self.assertEqual(len(resp.items), 15)
+        self.assertFalse(resp.diagnostics.get("creator_cap_relaxed"), "Feasible catalog should not relax cap")
+        self.assertNotIn("creator_cap_relaxed", resp.diagnostics.get("warnings", []))
+        self.assertNotIn("creator_cap_relaxed_insufficient_diversity", resp.diagnostics.get("warnings", []))
+
+        # Verify every 10-item sliding window has <= 2 items per creator
+        valid, violations = verify_sliding_window_diversity(resp.items, max_per_window=2, window_size=10)
+        self.assertTrue(valid, f"Expected zero window violations, got: {violations}")
+
+        # Verify all 15 item IDs are preserved
+        result_ids = [item.edit.id for item in resp.items]
+        self.assertEqual(sorted(result_ids), list(range(15)))
+
+    def test_distinguish_proven_infeasibility_from_budget_exhaustion(self):
+        """Verify explicit differentiation between proven infeasibility and search budget exhaustion."""
+        # 1. Proven infeasibility (3 creators, 20 items: max capacity in 10-window is 6 < 10)
+        items_3c = []
+        for i in range(20):
+            c = "CreatorA" if i < 10 else ("CreatorB" if i < 15 else "CreatorC")
+            items_3c.append(make_test_item(i, c))
+
+        cat_3c = Catalog(items_3c)
+        engine_3c = RecommendationEngine(cat_3c)
+        resp_3c = engine_3c.recommend(RecommendationRequest(surface="home", limit=15))
+
+        self.assertTrue(resp_3c.diagnostics.get("creator_cap_relaxed"))
+        self.assertIn("creator_cap_relaxed_proven_infeasible", resp_3c.diagnostics.get("warnings", []))
+        self.assertNotIn("creator_cap_relaxed_search_budget_exhausted", resp_3c.diagnostics.get("warnings", []))
+
+        # 2. Budget exhaustion test on adversarial sequence with budget=1
+        creator_seq = "DDACBEECEABDABC"
+        items = [make_test_item(i, f"Creator_{c}") for i, c in enumerate(creator_seq)]
+        ranked = [(it, 1.0 - i * 0.01, ("test",)) for i, it in enumerate(items)]
+
+        # With budget=1, it cannot complete the backtracking search and must flag budget exhaustion
+        _, relaxed, warnings = self.engine._apply_creator_cap(ranked, max_per_window=2, window_size=10, budget=1)
+        self.assertTrue(relaxed)
+        self.assertIn("creator_cap_relaxed_search_budget_exhausted", warnings)
+
+    def test_category_filter_rejection_and_empty_valid_filter(self):
+        """Reject unknown category filters; handle valid categories with 0 items cleanly."""
+        # Unknown category filter rejected at schema level
+        with self.assertRaises(ValueError):
+            RecommendationRequest(surface="home", category_filter="VFX")
+
+        # Valid category filter with zero matching items (all Cinematic items excluded)
+        cinematic_ids = tuple(item.id for item in self.engine.catalog.all_items if item.category == "Cinematic")
+        req_zero = RecommendationRequest(surface="home", category_filter="Cinematic", exclude_edit_ids=cinematic_ids)
+        resp_zero = self.engine.recommend(req_zero)
+
+        self.assertEqual(resp_zero.total_eligible, 0)
+        self.assertEqual(len(resp_zero.items), 0)
+        self.assertEqual(resp_zero.diagnostics.get("fallback_reason"), "empty_eligible_pool")
+
+    def test_honest_explanations_in_up_next_and_history_home(self):
+        """Do not claim category_balance in history Home, nor thematic_relation without thematic similarity."""
+        # 1. History-aware Home: low affinity items must NOT claim category_balance
+        valid_req = RecommendationRequest(
+            surface="home",
+            limit=17,
+            history=(
+                WatchHistoryEntry(edit_id=6, unique_watch_ms=10000, occurred_at="2026-10-16T12:00:00Z"),
+            ),
+        )
+        resp = self.engine.recommend(valid_req)
+        for item in resp.items:
+            self.assertNotIn(
+                "category_balance",
+                item.reason_codes,
+                f"Item {item.edit.id} claimed category_balance in history-aware feed",
+            )
+
+        # 2. Up Next: Unrelated item with no shared category, no shared tags, and no history
+        # Create an unrelated item with disjoint category and tags
+        disjoint_item = EditItem(
+            id=99,
+            title="Disjoint Sound",
+            category="Phonk",
+            tags=("phonk", "drift", "bass"),
+            description="Pure phonk music",
+            creator="Phonk Producer",
+            poster="/p.svg",
+            source="/s.webm",
+            duration="0:30",
+            duration_ms=30000,
+            duration_sec=30.0,
+            trending=False,
+        )
+        custom_catalog = Catalog([self.engine.catalog.get(0), disjoint_item])
+        custom_engine = RecommendationEngine(custom_catalog)
+        resp_upnext = custom_engine.recommend(RecommendationRequest(surface="up_next", current_edit_id=0, limit=5))
+
+        self.assertEqual(len(resp_upnext.items), 1)
+        upnext_item = resp_upnext.items[0]
+        self.assertEqual(upnext_item.edit.id, 99)
+        self.assertNotIn("thematic_relation", upnext_item.reason_codes)
+        self.assertIn("fallback_exploration", upnext_item.reason_codes)
+
 
 if __name__ == "__main__":
     unittest.main()

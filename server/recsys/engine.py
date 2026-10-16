@@ -185,7 +185,8 @@ class RecommendationEngine:
                 item, usable_history, self.catalog, self.idf_table
             )
             score = 0.50 + 0.50 * affinity
-            reasons = ("session_continuity",) if affinity > 0.10 else ("cold_start", "category_balance")
+            # When history exists, category balancing was not run; emit honest reason codes
+            reasons = ("session_continuity",) if affinity > 0.10 else ("fallback_exploration",)
             scored.append((item, score, reasons))
 
         # Deterministic sort: score DESC, id ASC
@@ -238,11 +239,16 @@ class RecommendationEngine:
             )
             if meaningful_shared and tag_score > 0.10:
                 reasons.append("tag_similarity")
+            elif tag_score > 0.05:
+                # Broad non-distinctive tag overlap
+                reasons.append("thematic_relation")
 
             if hist_score > 0.10:
                 reasons.append("session_continuity")
+
+            # Honest fallback when no thematic similarity exists
             if not reasons:
-                reasons.append("thematic_relation")
+                reasons.append("fallback_exploration")
 
             scored.append((item, total_score, tuple(reasons)))
 
@@ -255,12 +261,15 @@ class RecommendationEngine:
         ranked: List[Tuple[EditItem, float, Tuple[str, ...]]],
         max_per_window: int = 2,
         window_size: int = 10,
+        budget: int = 50000,
     ) -> Tuple[List[Tuple[EditItem, float, Tuple[str, ...]]], bool, List[str]]:
         """
         Deterministic sliding-window diversity reranker.
         Ensures at most max_per_window items from any creator within window_size.
-        If strict enforcement is impossible (e.g. <= 2 creators or pool exhausted),
-        emits explicit diagnostics and places remaining candidates to minimize concentration.
+        Enforces the cap whenever a feasible complete ordering exists using bounded
+        deterministic backtracking search with state memoization.
+        If proven infeasible or budget exhausted, falls back to minimizing concentration
+        and explicitly reports the genuine relaxation reason.
         """
         if not ranked:
             return [], False, []
@@ -270,19 +279,113 @@ class RecommendationEngine:
 
         # Case 1: Insufficient distinct creators in the eligible pool (e.g. 1-creator demo)
         if len(unique_creators) <= max_per_window:
-            warnings.append("creator_cap_relaxed")
-            return ranked, True, warnings
+            warnings.extend([
+                "creator_cap_relaxed",
+                "creator_cap_relaxed_insufficient_diversity",
+                "creator_cap_relaxed_proven_infeasible",
+            ])
+            return ranked, True, sorted(list(set(warnings)))
 
-        # Case 2: Greedy placement with sliding window check
+        # Case 2: Attempt greedy placement first
+        greedy_remaining = list(ranked)
+        greedy_result: List[Tuple[EditItem, float, Tuple[str, ...]]] = []
+        greedy_violated = False
+
+        while greedy_remaining:
+            window_start = max(0, len(greedy_result) - (window_size - 1))
+            recent_creators = [r[0].creator for r in greedy_result[window_start:]]
+
+            chosen_idx = None
+            for idx, candidate in enumerate(greedy_remaining):
+                creator = candidate[0].creator
+                if recent_creators.count(creator) < max_per_window:
+                    chosen_idx = idx
+                    break
+
+            if chosen_idx is not None:
+                greedy_result.append(greedy_remaining.pop(chosen_idx))
+            else:
+                greedy_violated = True
+                break
+
+        if not greedy_violated:
+            return greedy_result, False, []
+
+        # Case 3: Bounded deterministic backtracking search with state memoization
+        creators_list = sorted(list(unique_creators))
+        items_by_creator: Dict[str, List[Tuple[Tuple[EditItem, float, Tuple[str, ...]], int]]] = {
+            c: [] for c in creators_list
+        }
+        for orig_idx, item in enumerate(ranked):
+            items_by_creator[item[0].creator].append((item, orig_idx))
+
+        steps = 0
+        memo: Set[Tuple[Tuple[str, ...], Tuple[int, ...]]] = set()
+        budget_exhausted = False
+
+        def dfs(
+            current_creators: List[str], remaining_counts: Dict[str, int]
+        ) -> Optional[List[str]]:
+            nonlocal steps, budget_exhausted
+            steps += 1
+            if steps > budget:
+                budget_exhausted = True
+                return None
+
+            if sum(remaining_counts.values()) == 0:
+                return current_creators
+
+            recent = tuple(current_creators[-(window_size - 1) :])
+            counts_tuple = tuple(remaining_counts[c] for c in creators_list)
+            state_key = (recent, counts_tuple)
+            if state_key in memo:
+                return None
+
+            # Sort candidate creators by the original rank index of their next item
+            candidate_creators = []
+            for c in creators_list:
+                if remaining_counts[c] > 0 and recent.count(c) < max_per_window:
+                    consumed = len(items_by_creator[c]) - remaining_counts[c]
+                    orig_idx = items_by_creator[c][consumed][1]
+                    candidate_creators.append((orig_idx, c))
+
+            candidate_creators.sort()
+
+            for _, c in candidate_creators:
+                remaining_counts[c] -= 1
+                current_creators.append(c)
+                res = dfs(current_creators, remaining_counts)
+                if res is not None:
+                    return res
+                current_creators.pop()
+                remaining_counts[c] += 1
+                if budget_exhausted:
+                    return None
+
+            memo.add(state_key)
+            return None
+
+        init_counts = {c: len(items_by_creator[c]) for c in creators_list}
+        feasible_creator_order = dfs([], init_counts)
+
+        if feasible_creator_order is not None:
+            # Reconstruct exact candidate items in deterministic feasible order
+            ptrs = {c: 0 for c in creators_list}
+            reconstructed: List[Tuple[EditItem, float, Tuple[str, ...]]] = []
+            for c in feasible_creator_order:
+                reconstructed.append(items_by_creator[c][ptrs[c]][0])
+                ptrs[c] += 1
+            return reconstructed, False, []
+
+        # Case 4: Infeasible or search budget exhausted. Fallback to greedy concentration-minimization.
         remaining = list(ranked)
-        result: List[Tuple[EditItem, float, Tuple[str, ...]]] = []
+        fallback_result: List[Tuple[EditItem, float, Tuple[str, ...]]] = []
         relaxation_occurred = False
 
         while remaining:
-            window_start = max(0, len(result) - (window_size - 1))
-            recent_creators = [r[0].creator for r in result[window_start:]]
+            window_start = max(0, len(fallback_result) - (window_size - 1))
+            recent_creators = [r[0].creator for r in fallback_result[window_start:]]
 
-            # Find the highest-ranked remaining candidate satisfying the window cap
             chosen_idx = None
             for idx, candidate in enumerate(remaining):
                 creator = candidate[0].creator
@@ -291,23 +394,22 @@ class RecommendationEngine:
                     break
 
             if chosen_idx is not None:
-                result.append(remaining.pop(chosen_idx))
+                fallback_result.append(remaining.pop(chosen_idx))
             else:
-                # No remaining candidate satisfies the sliding window constraint
-                # (Mathematical impossibility or candidate pool exhausted)
                 relaxation_occurred = True
-
-                # Pick candidate that minimizes recent concentration, tie-breaking by initial rank
                 min_count = min(recent_creators.count(c[0].creator) for c in remaining)
                 best_idx = 0
                 for idx, candidate in enumerate(remaining):
                     if recent_creators.count(candidate[0].creator) == min_count:
                         best_idx = idx
                         break
+                fallback_result.append(remaining.pop(best_idx))
 
-                result.append(remaining.pop(best_idx))
+        warnings.append("creator_cap_relaxed")
+        warnings.append("creator_cap_relaxed_insufficient_diversity")
+        if budget_exhausted:
+            warnings.append("creator_cap_relaxed_search_budget_exhausted")
+        else:
+            warnings.append("creator_cap_relaxed_proven_infeasible")
 
-        if relaxation_occurred:
-            warnings.append("creator_cap_relaxed_insufficient_diversity")
-
-        return result, relaxation_occurred, warnings
+        return fallback_result, True, sorted(list(set(warnings)))
