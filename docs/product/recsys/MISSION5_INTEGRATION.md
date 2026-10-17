@@ -59,7 +59,8 @@ graph TD
   "limit": 4,
   "mode": "auto",
   "filters": {
-    "category": "Cinematic"
+    "category": "Cinematic",
+    "tags_all": ["cinematic", "landscape"]
   },
   "exclude_edit_ids": [1, 2],
   "context": {
@@ -79,8 +80,12 @@ graph TD
 - `limit`: Strict integer $1 \le \text{limit} \le 50$. Default `12`.
 - `mode`: `"auto"` (default), `"baseline"`, or `"neural"` (returns 503; neural models deferred to future milestones).
 - `filters.category`: Optional canonical category (`Cinematic`, `Gaming`, `Anime`, `Movies`, `Series`, `Phonk`, case-insensitive). Invalid values return 422.
+- `filters.tags_all`: Optional list of strings. Enforces strict all-tags-match filtering on candidates before ranking. Tags are trimmed, lowercased, and deduplicated (max 10 tags, 1–64 characters each). If valid tags match no items, an empty recommendation list is returned. Malformed tags return 422.
 - `exclude_edit_ids`: List of strict integers $\ge 0$ (max 200 items).
 - `context.history`: List of watch history objects (max 50 items).
+  - `edit_id`: Strict integer $\ge 0$.
+  - `unique_watch_ms`: Strict integer $0 \le \text{unique_watch_ms} \le 3{,}600{,}000$ (bounded to 1 hour max session watch time).
+  - `occurred_at`: Strict RFC3339 / ISO 8601 UTC-aware timestamp string with explicit timezone offset (e.g. `2026-10-17T12:00:00Z` or `+00:00`). Naive timestamps or malformed strings return 422.
 - `extra = "forbid"`: Rejects unknown fields with 422.
 - Strict ID types: Booleans, floats, and numeric strings are rejected with 422.
 
@@ -132,6 +137,8 @@ graph TD
 - Positioned alongside the `VideoPlayer` in the featured row.
 - Queries `surface="up_next"` with `current_edit_id=selected.id` and `limit=4`.
 - Active video is strictly suppressed on both backend and frontend layers.
+- **Elimination of Stale Rendering:** When the selected edit changes, `useRecommendations` immediately computes an offline fallback for the new video synchronously during rendering. The newly selected edit is never displayed in Up Next—even while an asynchronous network request is in flight. Previous recommendation results from superseded videos are never presented as the current results.
+- **Race Condition Protection:** Superceded requests are aborted via `AbortController`, and sequence counters (`seqRef`) guarantee that late-arriving out-of-order network responses are discarded.
 - Edit ID `0` is treated as a valid distinct integer.
 - Selecting any Up Next card calls `choose(edit)`, updating the video player, preserving A–B loop functionality, and triggering fresh suggestions.
 
@@ -143,11 +150,31 @@ graph TD
 
 ---
 
-## 4. Local Development & Startup Instructions
+## 4. Frontend API Recovery & Hardening
+
+The client layer in `src/api/recommendations.ts` implements robust defensive measures:
+1. **Bounded Timeout:** 5000ms request timeout using `AbortSignal.any()` (or linked controller) to prevent hung requests from leaving the UI in an indeterminate state, while cleanly preserving caller cancellation signals.
+2. **Response Envelope Validation:** Verifies that response is a valid JSON object matching `schema_version: "1.0"`, contains the expected surface identifier, and includes an array of items.
+3. **Local Catalog Mapping & Safety:** Server items are mapped strictly by numeric `edit_id` against the validated local catalog. Server asset URLs are never blindly trusted.
+4. **Defense-in-Depth Exclusions:** `excludeEditIds` and active video IDs are enforced client-side after response parsing.
+5. **Deduplication:** Ensures returned item IDs are strictly unique.
+6. **Zero-Result Preservation:** Distinguishes valid zero-result API responses (`source: "api"`, `items: []`) from network or parse failures (`source: "fallback"`).
+
+---
+
+## 5. Local Development & Startup Instructions
+
+### Dependencies & Reproducibility
+Python API dependencies are pinned in `server/recsys/requirements.txt` with compatible versions:
+- `fastapi>=0.115.0,<0.116.0`
+- `pydantic>=2.8.0,<3.0.0`
+- `uvicorn>=0.30.0,<0.31.0`
+- `httpx>=0.27.0,<0.28.0` (for testing)
 
 ### Running Both Backend and Frontend
 In terminal 1 (Python API backend):
 ```bash
+pip install -r server/recsys/requirements.txt
 python3 -m uvicorn server.recsys.api:app --host 127.0.0.1 --port 8000
 ```
 
@@ -163,26 +190,27 @@ If the backend is not started, the frontend operates completely independently in
 
 ---
 
-## 5. Security & Safety Considerations
+## 6. Security & Safety Considerations
 
-1. **No Stack Trace Leakage:** Custom exception handlers intercept `RequestValidationError`, `HTTPException`, and generic exceptions, ensuring no tracebacks or internal paths leak to clients.
-2. **Localhost Binding:** Development service binds strictly to `127.0.0.1` by default.
-3. **CORS Restrictions:** Restricted to explicit development origins (`127.0.0.1:5173`, `localhost:5173`, etc.).
-4. **No Auth or Telemetry:** No user accounts, credentials, or persistent telemetry tracking are introduced.
+1. **Sanitized Readiness & Health Probes:** `GET /api/v1/ready` returns a sanitized public error (`"Recommendation engine not ready: catalog initialization failed"`) with status 503 if the catalog fails to load. Internal directory paths, file system structures, or unhandled tracebacks are strictly excluded from the HTTP response and logged only server-side.
+2. **No Stack Trace Leakage:** Custom exception handlers intercept `RequestValidationError`, `HTTPException`, and generic exceptions, ensuring no tracebacks or internal paths leak to clients.
+3. **Localhost Binding:** Development service binds strictly to `127.0.0.1` by default.
+4. **CORS Restrictions:** Restricted to explicit development origins (`127.0.0.1:5173`, `localhost:5173`, etc.).
+5. **No Auth or Telemetry:** No user accounts, credentials, or persistent telemetry tracking are introduced.
 
 ---
 
-## 6. Testing & Verification Summary
+## 7. Testing & Verification Summary
 
 | Test Suite | Scope | Result |
 | :--- | :--- | :--- |
-| `server/recsys/tests/test_api.py` | API health, readiness, cold-start, Up Next, ID 0, type rejection, limits, exclusions, 503 neural | 15/15 passed |
-| `server/recsys/tests/test_engine.py` | Core ranking, creator diversity backtracking, diagnostics | 15/15 passed |
+| `server/recsys/tests/test_api.py` | API health, sanitized readiness, strict tag filters, RFC3339 validation, bounded watch time, cold-start, Up Next, ID 0, type rejection, limits, exclusions, 503 neural | 18/18 passed |
+| `server/recsys/tests/test_engine.py` | Core ranking, creator diversity backtracking, required tag filtering, diagnostics | 15/15 passed |
 | `server/recsys/tests/test_similarity.py` | Tag similarity, IDF weights, generic tag protection | 6/6 passed |
 | `server/recsys/tests/test_catalog.py` | Strict catalog envelope and item validation | 7/7 passed |
 | `server/recsys/tests/test_drift.py` | TypeScript vs Python snapshot drift check | 6/6 passed |
-| `tests/recommendations.test.mjs` | Client mapping, active video suppression, abort signal, offline fallback | 7/7 passed |
-| `tests/*.test.mjs` (all) | Full frontend test suite (search, loops, assets, skeletons, recsys) | 31/31 passed |
+| `tests/recommendations.test.mjs` | Client mapping, envelope validation, client exclusions, deduplication, valid 0-item responses, timeout, caller abort, tags filter fallback, stale Up Next render elimination | 12/12 passed |
+| `tests/*.test.mjs` (all) | Full frontend test suite (search, loops, assets, skeletons, recsys) | 36/36 passed |
 | `npm run typecheck` | TypeScript compiler typecheck | 0 errors |
 | `npm run build` | Vite production build & asset verification | Passed (314ms) |
 | Browser E2E Smoke Test | Real browser interaction with live FastAPI and Vite dev server | All passed |
@@ -190,8 +218,9 @@ If the backend is not started, the frontend operates completely independently in
 
 ---
 
-## 7. Deferred Features (Future Milestones)
+## 8. Deferred Features & Contract Notes
 
+- **Intentionally Deferred Chronology & Event-Integrity Checks:** The API accepts an ephemeral session history list with validated timestamps and bounded watch times, but does not enforce chronological ordering across entries or cryptographically signed session tokens. Because no server-side user state or session persistence exists in Stage 1, deep session trajectory validation is intentionally deferred to future milestones.
+- **Telemetry Event Ingestion (`POST /api/v1/events`):** No persistence, telemetry collection, user tracking, or event ingestion is authorized or implemented.
 - **Cursor Pagination & Session Snapshot Tokens:** With a 17-item demo catalog and a 50-item limit cap, frozen-snapshot cursor pagination is unnecessary and deferred until the curated 50+ video catalog is introduced in Stage 2.
 - **Neural Model Inference:** Explicitly returns 503 (`mode: "neural"`) until model training and evaluation are conducted.
-- **Telemetry Event Ingestion (`POST /api/v1/events`):** Deferred until client instrumentation and telemetry review are authorized.

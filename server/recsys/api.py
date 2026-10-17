@@ -7,6 +7,7 @@ Stage 1 RecommendationEngine and validated Catalog snapshot.
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -26,6 +27,7 @@ from .types import (
     WatchHistoryEntry as EngineHistoryEntry,
 )
 
+logger = logging.getLogger("lolixco.recsys")
 DEFAULT_SNAPSHOT_PATH = Path(__file__).parent / "catalog_snapshot.json"
 
 
@@ -46,8 +48,23 @@ class WatchHistoryEntryModel(StrictBaseModel):
     """Client session watch event context."""
 
     edit_id: StrictInt = Field(..., ge=0, description="Non-negative edit ID")
-    unique_watch_ms: StrictInt = Field(..., ge=0, description="Non-negative watch time in milliseconds")
-    occurred_at: str = Field(..., min_length=1, description="ISO 8601 UTC timestamp")
+    unique_watch_ms: StrictInt = Field(..., ge=0, le=3600000, description="Non-negative watch time in milliseconds (max 1 hour)")
+    occurred_at: str = Field(..., min_length=1, description="RFC3339 / ISO 8601 UTC timestamp")
+
+    @field_validator("occurred_at")
+    @classmethod
+    def validate_occurred_at(cls, v: str) -> str:
+        v_clean = v.strip()
+        if not v_clean:
+            raise ValueError("occurred_at cannot be empty")
+        try:
+            iso_str = v_clean.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso_str)
+            if dt.tzinfo is None:
+                raise ValueError("occurred_at must include a timezone offset (e.g. 'Z' or '+00:00')")
+        except Exception as e:
+            raise ValueError(f"Invalid RFC3339 timestamp format: {v!r}") from e
+        return v_clean
 
 
 class FiltersModel(StrictBaseModel):
@@ -70,6 +87,24 @@ class FiltersModel(StrictBaseModel):
                 f"Invalid category {v!r}. Must be one of canonical categories: {CANONICAL_CATEGORIES}"
             )
         return canonical_map[v_clean.lower()]
+
+    @field_validator("tags_all")
+    @classmethod
+    def validate_tags_all(cls, v: List[str]) -> List[str]:
+        cleaned = []
+        seen = set()
+        for t in v:
+            if not isinstance(t, str):
+                raise ValueError("Each tag must be a string")
+            norm = t.strip().lower()
+            if not norm:
+                raise ValueError("Tags cannot be empty or blank")
+            if len(norm) > 64:
+                raise ValueError("Tags must be at most 64 characters")
+            if norm not in seen:
+                seen.add(norm)
+                cleaned.append(norm)
+        return cleaned
 
 
 class ContextModel(StrictBaseModel):
@@ -257,9 +292,13 @@ def create_app(
     async def ready() -> Dict[str, Any]:
         """Readiness check. Validates that the catalog and engine are active."""
         if app_state["engine"] is None or app_state["catalog"] is None:
+            logger.error(
+                "Readiness probe failed: Catalog initialization error: %s",
+                app_state.get("catalog_error", "unknown"),
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Recommendation engine not ready: catalog unavailable ({app_state.get('catalog_error', 'unknown error')})",
+                detail="Recommendation engine not ready: catalog initialization failed",
             )
         return {
             "status": "ready",
@@ -313,8 +352,12 @@ def create_app(
                 )
 
         category_filter = None
-        if req.filters and req.filters.category:
-            category_filter = req.filters.category
+        required_tags = ()
+        if req.filters:
+            if req.filters.category:
+                category_filter = req.filters.category
+            if req.filters.tags_all:
+                required_tags = tuple(req.filters.tags_all)
 
         # Build engine request
         try:
@@ -325,6 +368,7 @@ def create_app(
                 exclude_edit_ids=tuple(req.exclude_edit_ids),
                 history=tuple(engine_history),
                 category_filter=category_filter,
+                required_tags=required_tags,
             )
             response = engine.recommend(engine_req)
         except KeyError as ke:

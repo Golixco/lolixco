@@ -21,13 +21,32 @@ export function useRecommendations(
   params: RecommendationParams,
   enabled: boolean = true,
 ): UseRecommendationsState {
-  // Compute immediate deterministic fallback so UI is immediately rendered without flicker or blank states
-  const [result, setResult] = useState<RecommendationResult>(() => computeLocalFallback(params));
-  const [loading, setLoading] = useState<boolean>(enabled);
-  const [nonce, setNonce] = useState(0);
+  const paramsKey = JSON.stringify({
+    surface: params.surface,
+    currentEditId: params.currentEditId,
+    limit: params.limit,
+    categoryFilter: params.categoryFilter,
+    tagsAll: params.tagsAll,
+    excludeEditIds: params.excludeEditIds,
+    history: params.history,
+  });
 
-  // Keep track of the latest request ID or sequence number to avoid race conditions
+  const [state, setState] = useState(() => ({
+    key: paramsKey,
+    result: computeLocalFallback(params),
+    loading: enabled,
+  }));
+
+  const [nonce, setNonce] = useState(0);
   const seqRef = useRef(0);
+
+  // Synchronously compute the clean immediate fallback if params changed.
+  // This guarantees that:
+  // 1. No currently selected edit in Up Next, even during loading or in the first render frame.
+  // 2. Old recommendations from a previous edit are not displayed for the new selection.
+  // 3. Telemetry truthfully reflects source: "fallback" until the new API response arrives.
+  const activeResult = state.key === paramsKey ? state.result : computeLocalFallback(params);
+  const isLoading = state.key === paramsKey ? state.loading : enabled;
 
   const refetch = () => {
     setNonce((n) => n + 1);
@@ -35,22 +54,34 @@ export function useRecommendations(
 
   useEffect(() => {
     if (!enabled) {
-      setResult(computeLocalFallback(params));
-      setLoading(false);
+      setState({
+        key: paramsKey,
+        result: computeLocalFallback(params),
+        loading: false,
+      });
       return;
     }
 
     const currentSeq = ++seqRef.current;
     const controller = new AbortController();
 
-    setLoading(true);
+    if (state.key !== paramsKey) {
+      setState({
+        key: paramsKey,
+        result: computeLocalFallback(params),
+        loading: true,
+      });
+    }
 
     fetchRecommendations(params, controller.signal)
       .then((res) => {
-        // Only apply if this is still the newest request
+        // Protect against out-of-order or superseded responses
         if (currentSeq === seqRef.current) {
-          setResult(res);
-          setLoading(false);
+          setState({
+            key: paramsKey,
+            result: res,
+            loading: false,
+          });
         }
       })
       .catch((err) => {
@@ -58,31 +89,25 @@ export function useRecommendations(
           return;
         }
         if (currentSeq === seqRef.current) {
-          // Graceful fallback on network failure or unexpected error
-          setResult(computeLocalFallback(params));
-          setLoading(false);
+          setState({
+            key: paramsKey,
+            result: computeLocalFallback(params),
+            loading: false,
+          });
         }
       });
 
     return () => {
       controller.abort();
     };
-  }, [
-    params.surface,
-    params.currentEditId,
-    params.limit,
-    params.categoryFilter,
-    JSON.stringify(params.excludeEditIds ?? []),
-    nonce,
-    enabled,
-  ]);
+  }, [paramsKey, nonce, enabled]);
 
   return {
-    items: result.items,
-    edits: result.edits,
-    loading,
-    source: result.source,
-    diagnostics: result.diagnostics,
+    items: activeResult.items,
+    edits: activeResult.edits,
+    loading: isLoading,
+    source: activeResult.source,
+    diagnostics: activeResult.diagnostics,
     refetch,
   };
 }

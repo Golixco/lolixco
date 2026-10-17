@@ -59,13 +59,18 @@ class TestRecommendationAPI(unittest.TestCase):
         self.assertEqual(data["total_edits"], 17)
 
     def test_ready_endpoint_unhealthy_when_catalog_missing(self) -> None:
-        """Test GET /api/v1/ready returns 503 when catalog fails to load."""
-        broken_app = create_app(catalog_path="/tmp/nonexistent_catalog.json")
+        """Test GET /api/v1/ready returns 503 and never leaks filesystem paths or raw exceptions."""
+        sensitive_path = "/var/private/secrets/company_credentials/catalog_snapshot.json"
+        broken_app = create_app(catalog_path=sensitive_path)
         client = TestClient(broken_app)
         resp = client.get("/api/v1/ready")
         self.assertEqual(resp.status_code, 503)
         data = resp.json()
-        self.assertIn("not ready", data["detail"])
+        self.assertEqual(data["detail"], "Recommendation engine not ready: catalog initialization failed")
+        # Ensure sensitive path is NEVER disclosed in the HTTP response
+        self.assertNotIn("secrets", resp.text)
+        self.assertNotIn("company_credentials", resp.text)
+        self.assertNotIn("catalog_snapshot.json", resp.text)
 
     def test_cold_start_home_recommendations(self) -> None:
         """Test POST /api/v1/recommendations for home surface with cold-start."""
@@ -258,6 +263,161 @@ class TestRecommendationAPI(unittest.TestCase):
         resp = self.client.post("/api/v1/recommendations", json=payload)
         self.assertEqual(resp.status_code, 503)
         self.assertIn("Neural recommendation mode is not available", resp.json()["detail"])
+
+    def test_tags_all_strict_filtering(self) -> None:
+        """Test that filters.tags_all strictly filters candidates and never returns unrelated edits."""
+        # 1. Matching tags: 'cinematic' and 'landscape'
+        resp_match = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "filters": {"tags_all": ["cinematic", "landscape"]},
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp_match.status_code, 200)
+        data_match = resp_match.json()
+        self.assertGreater(len(data_match["items"]), 0)
+        for item in data_match["items"]:
+            tags = [t.lower() for t in item["edit"]["tags"]]
+            self.assertIn("cinematic", tags)
+            self.assertIn("landscape", tags)
+
+        # 2. Nonexistent or unmatched tag: must return 200 with empty items, NEVER unrelated edits
+        resp_none = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "filters": {"tags_all": ["nonexistent_impossible_tag_12345"]},
+                "limit": 10,
+            },
+        )
+        self.assertEqual(resp_none.status_code, 200)
+        data_none = resp_none.json()
+        self.assertEqual(data_none["items"], [])
+        self.assertEqual(data_none["total_eligible"], 0)
+
+        # 3. Malformed empty tag -> 422
+        resp_empty_tag = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "filters": {"tags_all": [""]},
+            },
+        )
+        self.assertEqual(resp_empty_tag.status_code, 422)
+
+        # 4. Tag exceeding 64 chars -> 422
+        resp_long_tag = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "filters": {"tags_all": ["a" * 65]},
+            },
+        )
+        self.assertEqual(resp_long_tag.status_code, 422)
+
+        # 5. More than 10 tags -> 422
+        resp_too_many = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "filters": {"tags_all": [f"tag_{i}" for i in range(11)]},
+            },
+        )
+        self.assertEqual(resp_too_many.status_code, 422)
+
+    def test_watch_history_rfc3339_validation(self) -> None:
+        """Test strict RFC3339 timestamp and bounded watch time validation for session history."""
+        # Valid RFC3339 timestamp with Z
+        resp_valid_z = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 12000,
+                            "occurred_at": "2026-10-17T12:00:00Z",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_valid_z.status_code, 200)
+
+        # Valid RFC3339 timestamp with timezone offset (+05:30)
+        resp_valid_offset = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 12000,
+                            "occurred_at": "2026-10-17T17:30:00+05:30",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_valid_offset.status_code, 200)
+
+        # Malformed non-timestamp string -> 422
+        resp_bad_str = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 5000,
+                            "occurred_at": "yesterday",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_bad_str.status_code, 422)
+
+        # Missing timezone offset -> 422
+        resp_no_tz = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 5000,
+                            "occurred_at": "2026-10-17T12:00:00",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_no_tz.status_code, 422)
+
+        # Exceeding maximum watch time bound (3600000ms = 1hr) -> 422
+        resp_exceeded_watch = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 3600001,
+                            "occurred_at": "2026-10-17T12:00:00Z",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_exceeded_watch.status_code, 422)
 
 
 if __name__ == "__main__":

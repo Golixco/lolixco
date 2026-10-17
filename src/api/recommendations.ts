@@ -36,9 +36,13 @@ export interface RecommendationParams {
   currentEditId?: number;
   limit?: number;
   categoryFilter?: string | null;
+  tagsAll?: string[];
   excludeEditIds?: number[];
   history?: WatchHistoryContext[];
+  timeoutMs?: number;
 }
+
+export const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 
 /**
  * Determine if API requests are permitted in current environment.
@@ -102,6 +106,14 @@ export function computeLocalFallback(params: RecommendationParams): Recommendati
     pool = pool.filter((e) => e.category.toLowerCase() === normCat);
   }
 
+  if (params.tagsAll && params.tagsAll.length > 0) {
+    const normTags = params.tagsAll.map((t) => t.trim().toLowerCase());
+    pool = pool.filter((e) => {
+      const editTags = e.tags.map((t) => t.toLowerCase());
+      return normTags.every((t) => editTags.includes(t));
+    });
+  }
+
   const selectedEdits = pool.slice(0, limit);
   const items: RecommendedItem[] = selectedEdits.map((edit, idx) => ({
     rank: idx + 1,
@@ -131,6 +143,7 @@ export function computeLocalFallback(params: RecommendationParams): Recommendati
  * Fetch recommendations from the Python backend API.
  * Maps server-returned edit IDs strictly to local validated Edit records.
  * Falls back cleanly on network failures, timeouts, or backend downtime.
+ * Re-throws caller-initiated AbortError to preserve cancellation semantics.
  */
 export async function fetchRecommendations(
   params: RecommendationParams,
@@ -155,8 +168,15 @@ export async function fetchRecommendations(
     payload.current_edit_id = params.currentEditId;
   }
 
+  const filters: Record<string, unknown> = {};
   if (params.categoryFilter && params.categoryFilter !== "Featured") {
-    payload.filters = { category: params.categoryFilter, tags_all: [] };
+    filters.category = params.categoryFilter;
+  }
+  if (params.tagsAll && params.tagsAll.length > 0) {
+    filters.tags_all = params.tagsAll;
+  }
+  if (Object.keys(filters).length > 0) {
+    payload.filters = filters;
   }
 
   if (params.excludeEditIds && params.excludeEditIds.length > 0) {
@@ -167,6 +187,28 @@ export async function fetchRecommendations(
     payload.context = { history: params.history };
   }
 
+  // Setup bounded timeout with caller-initiated signal preservation
+  const timeoutMs = params.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const timeoutController = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  if (signal?.aborted) {
+    throw signal.reason || new DOMException("The operation was aborted", "AbortError");
+  }
+
+  const abortListener = () => {
+    if (timer) clearTimeout(timer);
+    timeoutController.abort(signal?.reason || new DOMException("The operation was aborted", "AbortError"));
+  };
+
+  if (signal) {
+    signal.addEventListener("abort", abortListener, { once: true });
+  }
+
+  timer = setTimeout(() => {
+    timeoutController.abort(new DOMException("Request timed out", "TimeoutError"));
+  }, timeoutMs);
+
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -174,72 +216,108 @@ export async function fetchRecommendations(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal,
+      signal: timeoutController.signal,
     });
+
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortListener);
 
     if (!response.ok) {
       return computeLocalFallback(params);
     }
 
-    const data = await response.json();
-
-    if (!data || !Array.isArray(data.items)) {
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
       return computeLocalFallback(params);
     }
 
-    // Map server IDs to validated local Edit objects to preserve Vite base paths and media
+    // Strict response envelope validation
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return computeLocalFallback(params);
+    }
+
+    const envelope = data as Record<string, unknown>;
+    if (envelope.schema_version !== "1.0" || envelope.surface !== params.surface) {
+      return computeLocalFallback(params);
+    }
+
+    if (!Array.isArray(envelope.items)) {
+      return computeLocalFallback(params);
+    }
+
+    // Defense in depth: strict exclusion & client-side catalog lookup
+    const excludedIds = new Set<number>(params.excludeEditIds ?? []);
+    if (params.surface === "up_next" && params.currentEditId !== undefined) {
+      excludedIds.add(params.currentEditId);
+    }
+
     const editsById = new Map<number, Edit>(edits.map((e) => [e.id, e]));
     const mappedItems: RecommendedItem[] = [];
     const mappedEdits: Edit[] = [];
     const seenIds = new Set<number>();
 
-    for (const rawItem of data.items) {
-      const rawId = rawItem.edit_id ?? rawItem.edit?.id;
-      if (typeof rawId !== "number" || seenIds.has(rawId)) {
+    for (const rawItem of envelope.items) {
+      if (!rawItem || typeof rawItem !== "object") continue;
+      const rawObj = rawItem as Record<string, unknown>;
+      const rawId = rawObj.edit_id ?? (rawObj.edit as Record<string, unknown> | undefined)?.id;
+
+      if (typeof rawId !== "number" || !Number.isInteger(rawId) || rawId < 0) {
         continue;
       }
 
-      // Enforce active video suppression on client even if server misbehaved
-      if (params.surface === "up_next" && rawId === params.currentEditId) {
+      // Check client-side exclusions and deduplicate
+      if (excludedIds.has(rawId) || seenIds.has(rawId)) {
         continue;
       }
 
       const localEdit = editsById.get(rawId);
       if (!localEdit) {
-        // Unknown server ID - ignore safely without crashing
+        // Unknown server ID - safely ignore
         continue;
       }
 
       seenIds.add(rawId);
       mappedEdits.push(localEdit);
       mappedItems.push({
-        rank: rawItem.rank ?? mappedItems.length + 1,
+        rank: typeof rawObj.rank === "number" ? rawObj.rank : mappedItems.length + 1,
         editId: rawId,
-        score: typeof rawItem.score === "number" ? rawItem.score : 0,
-        reasonCodes: Array.isArray(rawItem.reason_codes) ? rawItem.reason_codes : [],
+        score: typeof rawObj.score === "number" ? rawObj.score : 0,
+        reasonCodes: Array.isArray(rawObj.reason_codes)
+          ? (rawObj.reason_codes as string[]).filter((r) => typeof r === "string")
+          : [],
         edit: localEdit,
       });
     }
 
+    // Valid response from API, even if 0 items matched filters
     return {
       surface: params.surface,
       source: "api",
-      modeUsed: data.mode_used || "baseline",
-      catalogVersion: data.catalog_version || "demo-catalog-v1",
-      policyVersion: data.policy_version || "baseline-v1",
+      modeUsed: typeof envelope.mode_used === "string" ? envelope.mode_used : "baseline",
+      catalogVersion: typeof envelope.catalog_version === "string" ? envelope.catalog_version : "demo-catalog-v1",
+      policyVersion: typeof envelope.policy_version === "string" ? envelope.policy_version : "baseline-v1",
       items: mappedItems,
       edits: mappedEdits,
-      totalEligible: typeof data.total_eligible === "number" ? data.total_eligible : mappedEdits.length,
+      totalEligible: typeof envelope.total_eligible === "number" ? envelope.total_eligible : mappedEdits.length,
       diagnostics: {
-        warnings: Array.isArray(data.diagnostics?.warnings) ? data.diagnostics.warnings : [],
-        fallbackReason: data.diagnostics?.fallback_reason ?? null,
+        warnings: Array.isArray((envelope.diagnostics as Record<string, unknown> | undefined)?.warnings)
+          ? ((envelope.diagnostics as Record<string, unknown>).warnings as string[])
+          : [],
+        fallbackReason: (envelope.diagnostics as Record<string, unknown> | undefined)?.fallback_reason as string | null ?? null,
       },
     };
   } catch (error) {
-    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-      throw error;
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortListener);
+
+    // If caller explicitly aborted, rethrow the cancellation
+    if (signal?.aborted) {
+      throw signal.reason || (error instanceof Error ? error : new DOMException("The operation was aborted", "AbortError"));
     }
-    // Network errors, connection refused, or invalid JSON fall back gracefully
+
+    // Network errors, timeouts, or unparseable JSON fall back cleanly
     return computeLocalFallback(params);
   }
 }
