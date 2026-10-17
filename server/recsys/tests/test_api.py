@@ -401,6 +401,78 @@ class TestRecommendationAPI(unittest.TestCase):
         )
         self.assertEqual(resp_no_tz.status_code, 422)
 
+        # ISO week date (must be rejected by strict RFC3339) -> 422
+        resp_week = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 5000,
+                            "occurred_at": "2026-W42-6T12:34:56+00:00",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_week.status_code, 422)
+
+        # Space separator instead of 'T' (must be rejected by strict RFC3339) -> 422
+        resp_space = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 5000,
+                            "occurred_at": "2026-10-17 12:34:56+00:00",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_space.status_code, 422)
+
+        # Invalid calendar date (Feb 31) -> 422
+        resp_bad_date = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 5000,
+                            "occurred_at": "2026-02-31T12:00:00Z",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_bad_date.status_code, 422)
+
+        # Unbounded length string -> 422
+        resp_huge_str = self.client.post(
+            "/api/v1/recommendations",
+            json={
+                "surface": "home",
+                "context": {
+                    "history": [
+                        {
+                            "edit_id": 0,
+                            "unique_watch_ms": 5000,
+                            "occurred_at": "2026-10-17T12:00:00Z" + "0" * 100,
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(resp_huge_str.status_code, 422)
+
         # Exceeding maximum watch time bound (3600000ms = 1hr) -> 422
         resp_exceeded_watch = self.client.post(
             "/api/v1/recommendations",
@@ -418,6 +490,47 @@ class TestRecommendationAPI(unittest.TestCase):
             },
         )
         self.assertEqual(resp_exceeded_watch.status_code, 422)
+
+        # Valid RFC3339 timestamps (Z, numeric offset, fractional seconds) -> 200
+        for valid_ts in [
+            "2026-10-17T12:34:56Z",
+            "2026-10-17T12:34:56+00:00",
+            "2026-10-17T05:34:56.123456-07:00",
+        ]:
+            resp_ok = self.client.post(
+                "/api/v1/recommendations",
+                json={
+                    "surface": "home",
+                    "context": {
+                        "history": [
+                            {
+                                "edit_id": 0,
+                                "unique_watch_ms": 5000,
+                                "occurred_at": valid_ts,
+                            }
+                        ]
+                    },
+                },
+            )
+            self.assertEqual(resp_ok.status_code, 200, f"Failed for valid ts: {valid_ts}")
+
+    def test_request_body_size_limit_rejection(self) -> None:
+        """Paylod exceeding 64KB must be rejected with 413."""
+        # Oversized history or payload
+        large_history = [
+            {
+                "edit_id": i % 17,
+                "unique_watch_ms": 1000,
+                "occurred_at": "2026-10-17T12:00:00Z",
+            }
+            for i in range(2000)  # ~140KB payload
+        ]
+        resp = self.client.post(
+            "/api/v1/recommendations",
+            json={"surface": "home", "context": {"history": large_history}},
+        )
+        self.assertEqual(resp.status_code, 413)
+        self.assertIn("Request body too large", resp.json()["detail"])
 
 
 if __name__ == "__main__":

@@ -139,6 +139,9 @@ export function computeLocalFallback(params: RecommendationParams): Recommendati
   };
 }
 
+export const EXPECTED_SCHEMA_VERSION = "1.0";
+export const EXPECTED_CATALOG_VERSION = "demo-catalog-v1";
+
 /**
  * Fetch recommendations from the Python backend API.
  * Maps server-returned edit IDs strictly to local validated Edit records.
@@ -197,7 +200,6 @@ export async function fetchRecommendations(
   }
 
   const abortListener = () => {
-    if (timer) clearTimeout(timer);
     timeoutController.abort(signal?.reason || new DOMException("The operation was aborted", "AbortError"));
   };
 
@@ -219,19 +221,11 @@ export async function fetchRecommendations(
       signal: timeoutController.signal,
     });
 
-    if (timer) clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", abortListener);
-
     if (!response.ok) {
       return computeLocalFallback(params);
     }
 
-    let data: unknown;
-    try {
-      data = await response.json();
-    } catch {
-      return computeLocalFallback(params);
-    }
+    const data: unknown = await response.json();
 
     // Strict response envelope validation
     if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -239,15 +233,42 @@ export async function fetchRecommendations(
     }
 
     const envelope = data as Record<string, unknown>;
-    if (envelope.schema_version !== "1.0" || envelope.surface !== params.surface) {
+    if (
+      envelope.schema_version !== EXPECTED_SCHEMA_VERSION ||
+      typeof envelope.request_id !== "string" ||
+      envelope.request_id.length === 0 ||
+      envelope.surface !== params.surface ||
+      typeof envelope.mode_used !== "string" ||
+      envelope.mode_used.length === 0 ||
+      envelope.catalog_version !== EXPECTED_CATALOG_VERSION ||
+      typeof envelope.policy_version !== "string" ||
+      envelope.policy_version.length === 0 ||
+      typeof envelope.as_of !== "string" ||
+      envelope.as_of.length === 0 ||
+      !Array.isArray(envelope.items) ||
+      typeof envelope.total_eligible !== "number" ||
+      !Number.isInteger(envelope.total_eligible) ||
+      envelope.total_eligible < 0 ||
+      typeof envelope.has_more !== "boolean" ||
+      (envelope.next_cursor !== null && typeof envelope.next_cursor !== "string") ||
+      !envelope.diagnostics ||
+      typeof envelope.diagnostics !== "object" ||
+      Array.isArray(envelope.diagnostics)
+    ) {
       return computeLocalFallback(params);
     }
 
-    if (!Array.isArray(envelope.items)) {
+    const rawDiagnostics = envelope.diagnostics as Record<string, unknown>;
+    if (
+      !Array.isArray(rawDiagnostics.warnings) ||
+      !rawDiagnostics.warnings.every((w) => typeof w === "string") ||
+      (rawDiagnostics.fallback_reason !== null && typeof rawDiagnostics.fallback_reason !== "string")
+    ) {
       return computeLocalFallback(params);
     }
 
-    // Defense in depth: strict exclusion & client-side catalog lookup
+    // Defense in depth: strict exclusion, limit truncation, & client-side catalog lookup
+    const effectiveLimit = Math.max(1, Math.min(50, params.limit ?? (params.surface === "up_next" ? 4 : 12)));
     const excludedIds = new Set<number>(params.excludeEditIds ?? []);
     if (params.surface === "up_next" && params.currentEditId !== undefined) {
       excludedIds.add(params.currentEditId);
@@ -259,34 +280,59 @@ export async function fetchRecommendations(
     const seenIds = new Set<number>();
 
     for (const rawItem of envelope.items) {
-      if (!rawItem || typeof rawItem !== "object") continue;
+      if (mappedItems.length >= effectiveLimit) {
+        break;
+      }
+
+      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+        continue;
+      }
       const rawObj = rawItem as Record<string, unknown>;
-      const rawId = rawObj.edit_id ?? (rawObj.edit as Record<string, unknown> | undefined)?.id;
 
-      if (typeof rawId !== "number" || !Number.isInteger(rawId) || rawId < 0) {
+      // Validate rank, score, edit_id, reason_codes
+      if (
+        typeof rawObj.rank !== "number" ||
+        !Number.isInteger(rawObj.rank) ||
+        rawObj.rank < 1 ||
+        typeof rawObj.score !== "number" ||
+        Number.isNaN(rawObj.score) ||
+        typeof rawObj.edit_id !== "number" ||
+        !Number.isInteger(rawObj.edit_id) ||
+        rawObj.edit_id < 0 ||
+        !Array.isArray(rawObj.reason_codes) ||
+        !rawObj.reason_codes.every((r) => typeof r === "string")
+      ) {
         continue;
       }
 
-      // Check client-side exclusions and deduplicate
-      if (excludedIds.has(rawId) || seenIds.has(rawId)) {
+      // Validate nested edit consistency
+      if (
+        !rawObj.edit ||
+        typeof rawObj.edit !== "object" ||
+        Array.isArray(rawObj.edit) ||
+        (rawObj.edit as Record<string, unknown>).id !== rawObj.edit_id
+      ) {
         continue;
       }
 
-      const localEdit = editsById.get(rawId);
+      const editId = rawObj.edit_id;
+      if (excludedIds.has(editId) || seenIds.has(editId)) {
+        continue;
+      }
+
+      const localEdit = editsById.get(editId);
       if (!localEdit) {
         // Unknown server ID - safely ignore
         continue;
       }
 
-      seenIds.add(rawId);
+      seenIds.add(editId);
       mappedEdits.push(localEdit);
       mappedItems.push({
-        rank: typeof rawObj.rank === "number" ? rawObj.rank : mappedItems.length + 1,
-        editId: rawId,
-        score: typeof rawObj.score === "number" ? rawObj.score : 0,
-        reasonCodes: Array.isArray(rawObj.reason_codes)
-          ? (rawObj.reason_codes as string[]).filter((r) => typeof r === "string")
-          : [],
+        rank: rawObj.rank,
+        editId,
+        score: rawObj.score,
+        reasonCodes: rawObj.reason_codes as string[],
         edit: localEdit,
       });
     }
@@ -295,23 +341,18 @@ export async function fetchRecommendations(
     return {
       surface: params.surface,
       source: "api",
-      modeUsed: typeof envelope.mode_used === "string" ? envelope.mode_used : "baseline",
-      catalogVersion: typeof envelope.catalog_version === "string" ? envelope.catalog_version : "demo-catalog-v1",
-      policyVersion: typeof envelope.policy_version === "string" ? envelope.policy_version : "baseline-v1",
+      modeUsed: envelope.mode_used as string,
+      catalogVersion: envelope.catalog_version as string,
+      policyVersion: envelope.policy_version as string,
       items: mappedItems,
       edits: mappedEdits,
-      totalEligible: typeof envelope.total_eligible === "number" ? envelope.total_eligible : mappedEdits.length,
+      totalEligible: envelope.total_eligible as number,
       diagnostics: {
-        warnings: Array.isArray((envelope.diagnostics as Record<string, unknown> | undefined)?.warnings)
-          ? ((envelope.diagnostics as Record<string, unknown>).warnings as string[])
-          : [],
-        fallbackReason: (envelope.diagnostics as Record<string, unknown> | undefined)?.fallback_reason as string | null ?? null,
+        warnings: rawDiagnostics.warnings as string[],
+        fallbackReason: rawDiagnostics.fallback_reason as string | null,
       },
     };
   } catch (error) {
-    if (timer) clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", abortListener);
-
     // If caller explicitly aborted, rethrow the cancellation
     if (signal?.aborted) {
       throw signal.reason || (error instanceof Error ? error : new DOMException("The operation was aborted", "AbortError"));
@@ -319,5 +360,8 @@ export async function fetchRecommendations(
 
     // Network errors, timeouts, or unparseable JSON fall back cleanly
     return computeLocalFallback(params);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortListener);
   }
 }

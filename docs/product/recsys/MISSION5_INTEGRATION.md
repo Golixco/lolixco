@@ -153,23 +153,25 @@ graph TD
 ## 4. Frontend API Recovery & Hardening
 
 The client layer in `src/api/recommendations.ts` implements robust defensive measures:
-1. **Bounded Timeout:** 5000ms request timeout using `AbortSignal.any()` (or linked controller) to prevent hung requests from leaving the UI in an indeterminate state, while cleanly preserving caller cancellation signals.
-2. **Response Envelope Validation:** Verifies that response is a valid JSON object matching `schema_version: "1.0"`, contains the expected surface identifier, and includes an array of items.
-3. **Local Catalog Mapping & Safety:** Server items are mapped strictly by numeric `edit_id` against the validated local catalog. Server asset URLs are never blindly trusted.
-4. **Defense-in-Depth Exclusions:** `excludeEditIds` and active video IDs are enforced client-side after response parsing.
-5. **Deduplication:** Ensures returned item IDs are strictly unique.
-6. **Zero-Result Preservation:** Distinguishes valid zero-result API responses (`source: "api"`, `items: []`) from network or parse failures (`source: "fallback"`).
+1. **Full-Lifecycle Bounded Timeout & Caller Abort:** 5000ms request timeout remains active throughout request dispatch, body stream reading, JSON parsing, and response validation. All timer and event listener cleanups execute deterministically in a `finally` block. Caller-initiated abort signals (`AbortSignal`) are strictly preserved and re-thrown as `AbortError` regardless of whether cancellation occurs before fetch, during network transport, or during JSON body parsing.
+2. **Complete Response Envelope Validation:** Rejects incomplete or malformed envelopes. Requires valid `schema_version: "1.0"`, non-empty `request_id`, matching `surface`, non-empty `mode_used`, exact `catalog_version: "demo-catalog-v1"`, non-empty `policy_version`, non-empty `as_of`, non-negative integer `total_eligible`, boolean `has_more`, nullable `next_cursor`, and `diagnostics` object with string array `warnings` and nullable `fallback_reason`. Incompatible catalog versions are strictly rejected rather than assumed compatible.
+3. **Per-Item Schema & Consistency Validation:** For each returned item, validates integer `rank >= 1`, numeric `score`, integer `edit_id >= 0`, array `reason_codes`, and nested `edit.id === item.edit_id`. Contradictory nested IDs (e.g. `edit.id !== edit_id`) or unparseable items are safely filtered out.
+4. **Client-Side Limit Truncation:** Truncates items to the requested `limit` as defense-in-depth even if the backend returns excess candidates.
+5. **Local Catalog Mapping & Safety:** Server items are mapped strictly by numeric `edit_id` against the validated local catalog. Server asset URLs are never blindly trusted.
+6. **Defense-in-Depth Exclusions:** `excludeEditIds` and active video IDs are enforced client-side after response parsing.
+7. **Deduplication:** Ensures returned item IDs are strictly unique.
+8. **Zero-Result Preservation:** Distinguishes valid zero-result API responses (`source: "api"`, `items: []`) from network or parse failures (`source: "fallback"`).
 
 ---
 
 ## 5. Local Development & Startup Instructions
 
 ### Dependencies & Reproducibility
-Python API dependencies are pinned in `server/recsys/requirements.txt` with compatible versions:
-- `fastapi>=0.115.0,<0.116.0`
-- `pydantic>=2.8.0,<3.0.0`
-- `uvicorn>=0.30.0,<0.31.0`
-- `httpx>=0.27.0,<0.28.0` (for testing)
+Python API dependencies are pinned to exact tested versions in `server/recsys/requirements.txt`:
+- `fastapi==0.115.12`
+- `pydantic==2.11.1`
+- `uvicorn==0.34.0`
+- `httpx==0.28.1` (for test suite)
 
 ### Running Both Backend and Frontend
 In terminal 1 (Python API backend):
@@ -192,11 +194,13 @@ If the backend is not started, the frontend operates completely independently in
 
 ## 6. Security & Safety Considerations
 
-1. **Sanitized Readiness & Health Probes:** `GET /api/v1/ready` returns a sanitized public error (`"Recommendation engine not ready: catalog initialization failed"`) with status 503 if the catalog fails to load. Internal directory paths, file system structures, or unhandled tracebacks are strictly excluded from the HTTP response and logged only server-side.
-2. **No Stack Trace Leakage:** Custom exception handlers intercept `RequestValidationError`, `HTTPException`, and generic exceptions, ensuring no tracebacks or internal paths leak to clients.
-3. **Localhost Binding:** Development service binds strictly to `127.0.0.1` by default.
-4. **CORS Restrictions:** Restricted to explicit development origins (`127.0.0.1:5173`, `localhost:5173`, etc.).
-5. **No Auth or Telemetry:** No user accounts, credentials, or persistent telemetry tracking are introduced.
+1. **Request Body Size Limits:** HTTP middleware limits incoming request payloads to `MAX_REQUEST_BODY_BYTES = 65_536` (64 KB). Oversized payloads are rejected with HTTP 413 (Payload Too Large), preventing memory exhaustion or denial-of-service.
+2. **Strict RFC3339 Timestamp Contract:** Enforced consistently across Pydantic DTOs and core engine dataclasses via `validate_rfc3339_timestamp`. Rejects ISO week dates (`2026-W42-6T12:34:56+00:00`), space separators (`2026-10-17 12:34:56+00:00`), naive timestamps, invalid calendar dates (`2026-02-31`), and strings exceeding 35 characters.
+3. **Sanitized Readiness & Health Probes:** `GET /api/v1/ready` returns a sanitized public error (`"Recommendation engine not ready: catalog initialization failed"`) with status 503 if the catalog fails to load. Internal directory paths, file system structures, or unhandled tracebacks are strictly excluded from the HTTP response and logged only server-side.
+4. **No Stack Trace Leakage:** Custom exception handlers intercept `RequestValidationError`, `HTTPException`, and generic exceptions, ensuring no tracebacks or internal paths leak to clients.
+5. **Localhost Binding:** Development service binds strictly to `127.0.0.1` by default.
+6. **CORS Restrictions:** Restricted to explicit development origins (`127.0.0.1:5173`, `localhost:5173`, etc.).
+7. **No Auth or Telemetry:** No user accounts, credentials, or persistent telemetry tracking are introduced.
 
 ---
 
@@ -204,15 +208,15 @@ If the backend is not started, the frontend operates completely independently in
 
 | Test Suite | Scope | Result |
 | :--- | :--- | :--- |
-| `server/recsys/tests/test_api.py` | API health, sanitized readiness, strict tag filters, RFC3339 validation, bounded watch time, cold-start, Up Next, ID 0, type rejection, limits, exclusions, 503 neural | 18/18 passed |
+| `server/recsys/tests/test_api.py` | API health, sanitized readiness, strict tag filters, strict RFC3339 (week date & space rejection), 64KB body limit (413), bounded watch time, cold-start, Up Next, ID 0, type rejection, limits, exclusions, 503 neural | 19/19 passed |
 | `server/recsys/tests/test_engine.py` | Core ranking, creator diversity backtracking, required tag filtering, diagnostics | 15/15 passed |
 | `server/recsys/tests/test_similarity.py` | Tag similarity, IDF weights, generic tag protection | 6/6 passed |
 | `server/recsys/tests/test_catalog.py` | Strict catalog envelope and item validation | 7/7 passed |
 | `server/recsys/tests/test_drift.py` | TypeScript vs Python snapshot drift check | 6/6 passed |
-| `tests/recommendations.test.mjs` | Client mapping, envelope validation, client exclusions, deduplication, valid 0-item responses, timeout, caller abort, tags filter fallback, stale Up Next render elimination | 12/12 passed |
-| `tests/*.test.mjs` (all) | Full frontend test suite (search, loops, assets, skeletons, recsys) | 36/36 passed |
+| `tests/recommendations.test.mjs` | Client mapping, envelope validation (missing fields, wrong catalog), contradictory nested IDs, limit enforcement, client exclusions, deduplication, valid 0-item responses, stalled headers timeout, stalled JSON body timeout, caller abort during fetch and body parsing, tags filter fallback, synchronous fallback rendering, mounted React 19 hook integration (rapid selection, delayed responses, caller abort, API transitions) | 19/19 passed |
+| `tests/*.test.mjs` (all) | Full frontend test suite (search, loops, assets, skeletons, recsys) | 43/43 passed |
 | `npm run typecheck` | TypeScript compiler typecheck | 0 errors |
-| `npm run build` | Vite production build & asset verification | Passed (314ms) |
+| `npm run build` | Vite production build & asset verification | Passed (3.86s) |
 | Browser E2E Smoke Test | Real browser interaction with live FastAPI and Vite dev server | All passed |
 | Browser Offline Recovery | Real browser interaction with backend killed | Fallback passed |
 

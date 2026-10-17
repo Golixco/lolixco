@@ -25,10 +25,12 @@ from .types import (
     CANONICAL_CATEGORIES,
     RecommendationRequest as EngineRequest,
     WatchHistoryEntry as EngineHistoryEntry,
+    validate_rfc3339_timestamp,
 )
 
 logger = logging.getLogger("lolixco.recsys")
 DEFAULT_SNAPSHOT_PATH = Path(__file__).parent / "catalog_snapshot.json"
+MAX_REQUEST_BODY_BYTES = 65_536  # 64 KB maximum request body size
 
 
 # ---------------------------------------------------------------------------
@@ -49,22 +51,12 @@ class WatchHistoryEntryModel(StrictBaseModel):
 
     edit_id: StrictInt = Field(..., ge=0, description="Non-negative edit ID")
     unique_watch_ms: StrictInt = Field(..., ge=0, le=3600000, description="Non-negative watch time in milliseconds (max 1 hour)")
-    occurred_at: str = Field(..., min_length=1, description="RFC3339 / ISO 8601 UTC timestamp")
+    occurred_at: str = Field(..., max_length=35, description="Strict RFC3339 UTC timestamp")
 
     @field_validator("occurred_at")
     @classmethod
     def validate_occurred_at(cls, v: str) -> str:
-        v_clean = v.strip()
-        if not v_clean:
-            raise ValueError("occurred_at cannot be empty")
-        try:
-            iso_str = v_clean.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(iso_str)
-            if dt.tzinfo is None:
-                raise ValueError("occurred_at must include a timezone offset (e.g. 'Z' or '+00:00')")
-        except Exception as e:
-            raise ValueError(f"Invalid RFC3339 timestamp format: {v!r}") from e
-        return v_clean
+        return validate_rfc3339_timestamp(v)
 
 
 class FiltersModel(StrictBaseModel):
@@ -243,6 +235,33 @@ def create_app(
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Content-Type"],
     )
+
+    @app.middleware("http")
+    async def limit_request_body_size(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                length = int(content_length)
+                if length > MAX_REQUEST_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content={"detail": f"Request body too large. Maximum permitted size is {MAX_REQUEST_BODY_BYTES} bytes."},
+                    )
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"detail": "Invalid Content-Length header"},
+                )
+
+        if request.method in ("POST", "PUT", "PATCH"):
+            body = await request.body()
+            if len(body) > MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    content={"detail": f"Request body too large. Maximum permitted size is {MAX_REQUEST_BODY_BYTES} bytes."},
+                )
+
+        return await call_next(request)
 
     # Clean exception handlers to avoid leaking internals or stack traces
     @app.exception_handler(RequestValidationError)

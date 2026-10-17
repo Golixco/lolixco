@@ -1,6 +1,49 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+import re
 from typing import Any, Optional, Sequence, Tuple
+
+
+RFC3339_REGEX = re.compile(
+    r"^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})$"
+)
+
+
+def validate_rfc3339_timestamp(val: str) -> str:
+    """Validate that val is a strict RFC3339 UTC/offset timestamp.
+
+    Rejects:
+    - Non-string or empty strings.
+    - Strings exceeding 35 characters (preventing DoS and unbounded error reflection).
+    - ISO week dates (e.g. 2026-W42-6T12:34:56+00:00).
+    - Space separators (e.g. 2026-10-17 12:34:56+00:00).
+    - Naive timestamps without timezone offset.
+    - Invalid calendar dates (e.g. 2026-02-31T12:00:00Z).
+    """
+    if type(val) is not str:
+        raise TypeError(f"Timestamp must be string, got {type(val).__name__}")
+    clean = val.strip()
+    if not clean:
+        raise ValueError("Timestamp cannot be empty")
+    if len(clean) > 35:
+        raise ValueError("Timestamp exceeds maximum permitted length of 35 characters")
+
+    match = RFC3339_REGEX.match(clean)
+    if not match:
+        raise ValueError(
+            "Timestamp must follow strict RFC3339 format with explicit timezone (e.g. '2026-10-17T12:00:00Z' or '2026-10-17T12:00:00+00:00')"
+        )
+
+    # Check calendar and time validity
+    iso_str = clean.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            raise ValueError("Timestamp must include an explicit timezone offset")
+    except Exception as e:
+        raise ValueError(f"Invalid RFC3339 calendar date or time: {e}") from e
+
+    return clean
 
 
 @dataclass(frozen=True)
@@ -78,16 +121,9 @@ class WatchHistoryEntry:
             raise TypeError(f"unique_watch_ms must be non-negative integer, got {type(self.unique_watch_ms).__name__}: {self.unique_watch_ms!r}")
         if self.unique_watch_ms > 3600000:
             raise ValueError(f"unique_watch_ms exceeds maximum permitted 3600000ms (1hr), got {self.unique_watch_ms}")
-        if type(self.occurred_at) is not str or not self.occurred_at.strip():
-            raise TypeError(f"occurred_at must be non-empty string, got {type(self.occurred_at).__name__}: {self.occurred_at!r}")
-        # Validate RFC3339 timestamp
-        try:
-            iso_str = self.occurred_at.strip().replace("Z", "+00:00")
-            dt = datetime.fromisoformat(iso_str)
-            if dt.tzinfo is None:
-                raise ValueError("occurred_at must include a timezone offset (e.g. 'Z' or '+00:00')")
-        except Exception as e:
-            raise ValueError(f"Invalid RFC3339 timestamp format {self.occurred_at!r}: {e}") from e
+        if type(self.occurred_at) is not str:
+            raise TypeError(f"occurred_at must be string, got {type(self.occurred_at).__name__}: {self.occurred_at!r}")
+        validate_rfc3339_timestamp(self.occurred_at)
 
 
 CANONICAL_CATEGORIES: tuple[str, ...] = (
