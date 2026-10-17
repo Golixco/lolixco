@@ -254,12 +254,24 @@ def create_app(
                 )
 
         if request.method in ("POST", "PUT", "PATCH"):
-            body = await request.body()
-            if len(body) > MAX_REQUEST_BODY_BYTES:
-                return JSONResponse(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    content={"detail": f"Request body too large. Maximum permitted size is {MAX_REQUEST_BODY_BYTES} bytes."},
-                )
+            chunks = []
+            total_bytes = 0
+            async for chunk in request.stream():
+                total_bytes += len(chunk)
+                if total_bytes > MAX_REQUEST_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content={"detail": f"Request body too large. Maximum permitted size is {MAX_REQUEST_BODY_BYTES} bytes."},
+                    )
+                chunks.append(chunk)
+
+            full_body = b"".join(chunks)
+            request._body = full_body
+
+            async def receive() -> dict:
+                return {"type": "http.request", "body": full_body, "more_body": False}
+
+            request._receive = receive
 
         return await call_next(request)
 

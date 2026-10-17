@@ -167,11 +167,14 @@ The client layer in `src/api/recommendations.ts` implements robust defensive mea
 ## 5. Local Development & Startup Instructions
 
 ### Dependencies & Reproducibility
-Python API dependencies are pinned to exact tested versions in `server/recsys/requirements.txt`:
+Python API dependencies specify pinned top-level versions in `server/recsys/requirements.txt`:
 - `fastapi==0.115.12`
 - `pydantic==2.11.1`
 - `uvicorn==0.34.0`
 - `httpx==0.28.1` (for test suite)
+
+> [!NOTE]
+> **Dependency Reproducibility Boundary:** Exact top-level pins in `requirements.txt` provide stable direct dependency baselines for local development and testing, but do not constitute a fully locked transitive dependency tree (e.g., via `pip-tools` compile or lockfile). Transitive dependencies (such as `starlette`, `anyio`, and `sniffio`) are resolved within their respective package-declared bounds.
 
 ### Running Both Backend and Frontend
 In terminal 1 (Python API backend):
@@ -194,13 +197,18 @@ If the backend is not started, the frontend operates completely independently in
 
 ## 6. Security & Safety Considerations
 
-1. **Request Body Size Limits:** HTTP middleware limits incoming request payloads to `MAX_REQUEST_BODY_BYTES = 65_536` (64 KB). Oversized payloads are rejected with HTTP 413 (Payload Too Large), preventing memory exhaustion or denial-of-service.
-2. **Strict RFC3339 Timestamp Contract:** Enforced consistently across Pydantic DTOs and core engine dataclasses via `validate_rfc3339_timestamp`. Rejects ISO week dates (`2026-W42-6T12:34:56+00:00`), space separators (`2026-10-17 12:34:56+00:00`), naive timestamps, invalid calendar dates (`2026-02-31`), and strings exceeding 35 characters.
-3. **Sanitized Readiness & Health Probes:** `GET /api/v1/ready` returns a sanitized public error (`"Recommendation engine not ready: catalog initialization failed"`) with status 503 if the catalog fails to load. Internal directory paths, file system structures, or unhandled tracebacks are strictly excluded from the HTTP response and logged only server-side.
-4. **No Stack Trace Leakage:** Custom exception handlers intercept `RequestValidationError`, `HTTPException`, and generic exceptions, ensuring no tracebacks or internal paths leak to clients.
-5. **Localhost Binding:** Development service binds strictly to `127.0.0.1` by default.
-6. **CORS Restrictions:** Restricted to explicit development origins (`127.0.0.1:5173`, `localhost:5173`, etc.).
-7. **No Auth or Telemetry:** No user accounts, credentials, or persistent telemetry tracking are introduced.
+1. **Incremental Streaming Request Body Size Limit:** HTTP middleware enforces an immediate cutoff at `MAX_REQUEST_BODY_BYTES = 65_536` (64 KB). The server consumes incoming request stream chunks incrementally; as soon as cumulative read bytes exceed 65,536 bytes, it terminates stream consumption immediately and returns HTTP 413 (Payload Too Large). This bounds server memory consumption even when `Content-Length` is absent, chunked, or untruthful.
+2. **Strict RFC3339 Timestamp Contract:** Enforced consistently across Pydantic DTOs and core engine dataclasses via `validate_rfc3339_timestamp`. Leading/trailing whitespace is strictly rejected (`val != val.strip()`) rather than silently normalized. Rejects ISO week dates (`2026-W42-6T12:34:56+00:00`), space separators (`2026-10-17 12:34:56+00:00`), naive timestamps, invalid calendar dates (`2026-02-31`), and strings exceeding 35 characters.
+3. **Frontend Contract Enforcement:** The frontend client strictly rejects inconsistent or unsupported backend semantics and falls back cleanly:
+   - `has_more` must be `false` and `next_cursor` must be `null` (Mission 5 does not support pagination).
+   - `as_of` must be a valid RFC3339/ISO timestamp with a verified real calendar date.
+   - All recommendation item scores must be finite numbers (rejecting `Infinity`, `-Infinity`, and `NaN`).
+   - Serving mode must strictly match supported API mode (`mode_used === "baseline"`).
+4. **Sanitized Readiness & Health Probes:** `GET /api/v1/ready` returns a sanitized public error (`"Recommendation engine not ready: catalog initialization failed"`) with status 503 if the catalog fails to load. Internal directory paths, file system structures, or unhandled tracebacks are strictly excluded from the HTTP response and logged only server-side.
+5. **No Stack Trace Leakage:** Custom exception handlers intercept `RequestValidationError`, `HTTPException`, and generic exceptions, ensuring no tracebacks or internal paths leak to clients.
+6. **Localhost Binding:** Development service binds strictly to `127.0.0.1` by default.
+7. **CORS Restrictions:** Restricted to explicit development origins (`127.0.0.1:5173`, `localhost:5173`, etc.).
+8. **No Auth or Telemetry:** No user accounts, credentials, or persistent telemetry tracking are introduced.
 
 ---
 
@@ -208,15 +216,15 @@ If the backend is not started, the frontend operates completely independently in
 
 | Test Suite | Scope | Result |
 | :--- | :--- | :--- |
-| `server/recsys/tests/test_api.py` | API health, sanitized readiness, strict tag filters, strict RFC3339 (week date & space rejection), 64KB body limit (413), bounded watch time, cold-start, Up Next, ID 0, type rejection, limits, exclusions, 503 neural | 19/19 passed |
+| `server/recsys/tests/test_api.py` | API health, sanitized readiness, strict tag filters, strict RFC3339 whitespace & week date rejection, incremental streaming 64KB body limit (413), declared oversized Content-Length (413), bounded watch time, cold-start, Up Next, ID 0, type rejection, limits, exclusions, 503 neural | 19/19 passed |
 | `server/recsys/tests/test_engine.py` | Core ranking, creator diversity backtracking, required tag filtering, diagnostics | 15/15 passed |
 | `server/recsys/tests/test_similarity.py` | Tag similarity, IDF weights, generic tag protection | 6/6 passed |
-| `server/recsys/tests/test_catalog.py` | Strict catalog envelope and item validation | 7/7 passed |
+| `server/recsys/tests/test_catalog.py` | Strict catalog envelope and item validation, core model RFC3339 whitespace and calendar validation | 7/7 passed |
 | `server/recsys/tests/test_drift.py` | TypeScript vs Python snapshot drift check | 6/6 passed |
-| `tests/recommendations.test.mjs` | Client mapping, envelope validation (missing fields, wrong catalog), contradictory nested IDs, limit enforcement, client exclusions, deduplication, valid 0-item responses, stalled headers timeout, stalled JSON body timeout, caller abort during fetch and body parsing, tags filter fallback, synchronous fallback rendering, mounted React 19 hook integration (rapid selection, delayed responses, caller abort, API transitions) | 19/19 passed |
-| `tests/*.test.mjs` (all) | Full frontend test suite (search, loops, assets, skeletons, recsys) | 43/43 passed |
+| `tests/recommendations.test.mjs` | Client mapping, envelope validation (missing fields, wrong catalog, unsupported pagination, invalid as_of, unsupported mode), contradictory nested IDs, nonfinite score exclusion, limit enforcement, client exclusions, deduplication, valid 0-item responses, stalled headers timeout, stalled JSON body timeout, caller abort during fetch and body parsing, tags filter fallback, synchronous fallback rendering, mounted React 19 hook integration (rapid selection, delayed responses, caller abort, API transitions, uncancelled superseded response sequence guard) | 24/24 passed |
+| `tests/*.test.mjs` (all) | Full frontend test suite (search, loops, assets, skeletons, recsys) | 48/48 passed |
 | `npm run typecheck` | TypeScript compiler typecheck | 0 errors |
-| `npm run build` | Vite production build & asset verification | Passed (3.86s) |
+| `npm run build` | Vite production build & asset verification | Passed |
 | Browser E2E Smoke Test | Real browser interaction with live FastAPI and Vite dev server | All passed |
 | Browser Offline Recovery | Real browser interaction with backend killed | Fallback passed |
 
@@ -226,5 +234,6 @@ If the backend is not started, the frontend operates completely independently in
 
 - **Intentionally Deferred Chronology & Event-Integrity Checks:** The API accepts an ephemeral session history list with validated timestamps and bounded watch times, but does not enforce chronological ordering across entries or cryptographically signed session tokens. Because no server-side user state or session persistence exists in Stage 1, deep session trajectory validation is intentionally deferred to future milestones.
 - **Telemetry Event Ingestion (`POST /api/v1/events`):** No persistence, telemetry collection, user tracking, or event ingestion is authorized or implemented.
-- **Cursor Pagination & Session Snapshot Tokens:** With a 17-item demo catalog and a 50-item limit cap, frozen-snapshot cursor pagination is unnecessary and deferred until the curated 50+ video catalog is introduced in Stage 2.
+- **Cursor Pagination & Session Snapshot Tokens:** With a 17-item demo catalog and a 50-item limit cap, frozen-snapshot cursor pagination is not supported in Mission 5; responses must have `has_more: false` and `next_cursor: null`.
 - **Neural Model Inference:** Explicitly returns 503 (`mode: "neural"`) until model training and evaluation are conducted.
+

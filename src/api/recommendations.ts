@@ -141,6 +141,26 @@ export function computeLocalFallback(params: RecommendationParams): Recommendati
 
 export const EXPECTED_SCHEMA_VERSION = "1.0";
 export const EXPECTED_CATALOG_VERSION = "demo-catalog-v1";
+export const SUPPORTED_API_MODE = "baseline";
+export const ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Validate that a string conforms to RFC3339/ISO-8601 with a real calendar date.
+ */
+export function isValidIsoTimestamp(str: unknown): str is string {
+  if (typeof str !== "string" || !ISO_TIMESTAMP_REGEX.test(str)) {
+    return false;
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);
+  if (!match) return false;
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (day > daysInMonth) return false;
+  return !Number.isNaN(Date.parse(str));
+}
 
 /**
  * Fetch recommendations from the Python backend API.
@@ -238,19 +258,17 @@ export async function fetchRecommendations(
       typeof envelope.request_id !== "string" ||
       envelope.request_id.length === 0 ||
       envelope.surface !== params.surface ||
-      typeof envelope.mode_used !== "string" ||
-      envelope.mode_used.length === 0 ||
+      envelope.mode_used !== SUPPORTED_API_MODE ||
       envelope.catalog_version !== EXPECTED_CATALOG_VERSION ||
       typeof envelope.policy_version !== "string" ||
       envelope.policy_version.length === 0 ||
-      typeof envelope.as_of !== "string" ||
-      envelope.as_of.length === 0 ||
+      !isValidIsoTimestamp(envelope.as_of) ||
       !Array.isArray(envelope.items) ||
       typeof envelope.total_eligible !== "number" ||
       !Number.isInteger(envelope.total_eligible) ||
       envelope.total_eligible < 0 ||
-      typeof envelope.has_more !== "boolean" ||
-      (envelope.next_cursor !== null && typeof envelope.next_cursor !== "string") ||
+      envelope.has_more !== false ||
+      envelope.next_cursor !== null ||
       !envelope.diagnostics ||
       typeof envelope.diagnostics !== "object" ||
       Array.isArray(envelope.diagnostics)
@@ -295,7 +313,7 @@ export async function fetchRecommendations(
         !Number.isInteger(rawObj.rank) ||
         rawObj.rank < 1 ||
         typeof rawObj.score !== "number" ||
-        Number.isNaN(rawObj.score) ||
+        !Number.isFinite(rawObj.score) ||
         typeof rawObj.edit_id !== "number" ||
         !Number.isInteger(rawObj.edit_id) ||
         rawObj.edit_id < 0 ||

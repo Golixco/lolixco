@@ -14,6 +14,7 @@ def validate_rfc3339_timestamp(val: str) -> str:
 
     Rejects:
     - Non-string or empty strings.
+    - Surrounding whitespace (leading or trailing whitespace is rejected, not normalized).
     - Strings exceeding 35 characters (preventing DoS and unbounded error reflection).
     - ISO week dates (e.g. 2026-W42-6T12:34:56+00:00).
     - Space separators (e.g. 2026-10-17 12:34:56+00:00).
@@ -22,20 +23,21 @@ def validate_rfc3339_timestamp(val: str) -> str:
     """
     if type(val) is not str:
         raise TypeError(f"Timestamp must be string, got {type(val).__name__}")
-    clean = val.strip()
-    if not clean:
+    if not val:
         raise ValueError("Timestamp cannot be empty")
-    if len(clean) > 35:
+    if val != val.strip():
+        raise ValueError("Timestamp cannot contain leading or trailing whitespace")
+    if len(val) > 35:
         raise ValueError("Timestamp exceeds maximum permitted length of 35 characters")
 
-    match = RFC3339_REGEX.match(clean)
+    match = RFC3339_REGEX.match(val)
     if not match:
         raise ValueError(
             "Timestamp must follow strict RFC3339 format with explicit timezone (e.g. '2026-10-17T12:00:00Z' or '2026-10-17T12:00:00+00:00')"
         )
 
     # Check calendar and time validity
-    iso_str = clean.replace("Z", "+00:00").replace("z", "+00:00")
+    iso_str = val.replace("Z", "+00:00").replace("z", "+00:00")
     try:
         dt = datetime.fromisoformat(iso_str)
         if dt.tzinfo is None:
@@ -43,7 +45,7 @@ def validate_rfc3339_timestamp(val: str) -> str:
     except Exception as e:
         raise ValueError(f"Invalid RFC3339 calendar date or time: {e}") from e
 
-    return clean
+    return val
 
 
 @dataclass(frozen=True)

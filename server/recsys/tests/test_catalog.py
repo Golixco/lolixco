@@ -369,6 +369,40 @@ class TestCatalogValidation(unittest.TestCase):
         with self.assertRaises(TypeError):
             catalog.get(False)
 
+    def test_watch_history_entry_strict_validation(self):
+        """Verify WatchHistoryEntry rejects whitespace, week dates, spaces, and invalid dates."""
+        # 1. Valid entry
+        entry = WatchHistoryEntry(
+            edit_id=0,
+            unique_watch_ms=5000,
+            occurred_at="2026-10-17T12:00:00Z",
+        )
+        self.assertEqual(entry.edit_id, 0)
+        self.assertEqual(entry.occurred_at, "2026-10-17T12:00:00Z")
+
+        # 2. Leading or trailing whitespace must be rejected with ValueError
+        for ws_ts in [
+            " 2026-10-17T12:00:00Z",
+            "2026-10-17T12:00:00Z ",
+            "\t2026-10-17T12:00:00Z",
+            "2026-10-17T12:00:00Z\n",
+        ]:
+            with self.subTest(ts=ws_ts):
+                with self.assertRaises(ValueError):
+                    WatchHistoryEntry(edit_id=0, unique_watch_ms=5000, occurred_at=ws_ts)
+
+        # 3. ISO week date rejected
+        with self.assertRaises(ValueError):
+            WatchHistoryEntry(edit_id=0, unique_watch_ms=5000, occurred_at="2026-W42-6T12:34:56+00:00")
+
+        # 4. Space separator rejected
+        with self.assertRaises(ValueError):
+            WatchHistoryEntry(edit_id=0, unique_watch_ms=5000, occurred_at="2026-10-17 12:34:56+00:00")
+
+        # 5. Invalid calendar date rejected
+        with self.assertRaises(ValueError):
+            WatchHistoryEntry(edit_id=0, unique_watch_ms=5000, occurred_at="2026-02-31T12:00:00Z")
+
 
 if __name__ == "__main__":
     unittest.main()

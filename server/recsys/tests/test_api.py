@@ -20,12 +20,14 @@ Tests:
 - Backend readiness failure when catalog is corrupt or missing
 """
 
+import asyncio
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
+import httpx
 
 from server.recsys.api import app, create_app
 from server.recsys.catalog import load_catalog_from_json
@@ -491,6 +493,30 @@ class TestRecommendationAPI(unittest.TestCase):
         )
         self.assertEqual(resp_exceeded_watch.status_code, 422)
 
+        # Surrounding whitespace rejected -> 422
+        for ws_ts in [
+            " 2026-10-17T12:34:56Z",
+            "2026-10-17T12:34:56Z ",
+            "\t2026-10-17T12:34:56Z\n",
+        ]:
+            with self.subTest(ts=ws_ts):
+                resp_ws = self.client.post(
+                    "/api/v1/recommendations",
+                    json={
+                        "surface": "home",
+                        "context": {
+                            "history": [
+                                {
+                                    "edit_id": 0,
+                                    "unique_watch_ms": 5000,
+                                    "occurred_at": ws_ts,
+                                }
+                            ]
+                        },
+                    },
+                )
+                self.assertEqual(resp_ws.status_code, 422)
+
         # Valid RFC3339 timestamps (Z, numeric offset, fractional seconds) -> 200
         for valid_ts in [
             "2026-10-17T12:34:56Z",
@@ -515,8 +541,8 @@ class TestRecommendationAPI(unittest.TestCase):
             self.assertEqual(resp_ok.status_code, 200, f"Failed for valid ts: {valid_ts}")
 
     def test_request_body_size_limit_rejection(self) -> None:
-        """Paylod exceeding 64KB must be rejected with 413."""
-        # Oversized history or payload
+        """Payload exceeding 64KB must be incrementally rejected with 413."""
+        # 1. Declared oversized Content-Length -> 413
         large_history = [
             {
                 "edit_id": i % 17,
@@ -531,6 +557,36 @@ class TestRecommendationAPI(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 413)
         self.assertIn("Request body too large", resp.json()["detail"])
+
+        # 2. Streamed chunks without Content-Length exceeding 64KB -> 413
+        chunks_sent = [0]
+
+        async def stream_oversized():
+            for _ in range(5):
+                chunks_sent[0] += 1
+                yield b"x" * 20_000  # 5 * 20KB = 100KB > 64KB
+
+        async def run_stream_test():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                return await ac.post(
+                    "/api/v1/recommendations",
+                    content=stream_oversized(),
+                    headers={"Content-Type": "application/json"},
+                )
+
+        resp_stream = asyncio.run(run_stream_test())
+        self.assertEqual(resp_stream.status_code, 413)
+        self.assertIn("Request body too large", resp_stream.json()["detail"])
+        # Incremental cutoff must stop reading before consuming all 5 chunks (4 chunks * 20KB = 80KB > 64KB)
+        self.assertLess(chunks_sent[0], 5)
+
+        # 3. Small valid body succeeds -> 200
+        resp_small = self.client.post(
+            "/api/v1/recommendations",
+            json={"surface": "home", "limit": 2},
+        )
+        self.assertEqual(resp_small.status_code, 200)
 
 
 if __name__ == "__main__":

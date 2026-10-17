@@ -279,6 +279,112 @@ test("Incomplete response envelope triggers local fallback", async () => {
   }
 });
 
+test("Unsupported pagination contract (has_more: true or next_cursor !== null) triggers local fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    // has_more: true
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () =>
+        makeValidEnvelope({
+          has_more: true,
+          items: [makeValidItem(0)],
+        }),
+    });
+    const hasMoreResult = await fetchRecommendations({ surface: "home", limit: 3 });
+    assert.equal(hasMoreResult.source, "fallback");
+
+    // next_cursor: "cursor_123"
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () =>
+        makeValidEnvelope({
+          next_cursor: "cursor_123",
+          items: [makeValidItem(0)],
+        }),
+    });
+    const cursorResult = await fetchRecommendations({ surface: "home", limit: 3 });
+    assert.equal(cursorResult.source, "fallback");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Invalid or malformed as_of timestamp triggers local fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const invalidTimestamps = [
+      "not-a-timestamp",
+      "2026/10/17 12:00:00",
+      "2026-02-31T12:00:00Z",
+      123456789,
+      null,
+    ];
+
+    for (const ts of invalidTimestamps) {
+      globalThis.fetch = async () => ({
+        ok: true,
+        json: async () =>
+          makeValidEnvelope({
+            as_of: ts,
+            items: [makeValidItem(0)],
+          }),
+      });
+      const result = await fetchRecommendations({ surface: "home", limit: 3 });
+      assert.equal(result.source, "fallback");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Unsupported mode_used triggers local fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const unsupportedModes = ["neural", "collaborative_v2", "experimental", "unknown"];
+    for (const mode of unsupportedModes) {
+      globalThis.fetch = async () => ({
+        ok: true,
+        json: async () =>
+          makeValidEnvelope({
+            mode_used: mode,
+            items: [makeValidItem(0)],
+          }),
+      });
+      const result = await fetchRecommendations({ surface: "home", limit: 3 });
+      assert.equal(result.source, "fallback");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Nonfinite recommendation scores (Infinity, -Infinity, NaN) are safely excluded", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () =>
+        makeValidEnvelope({
+          items: [
+            makeValidItem(0, { rank: 1, score: Infinity }),
+            makeValidItem(1, { rank: 2, score: -Infinity }),
+            makeValidItem(2, { rank: 3, score: NaN }),
+            makeValidItem(3, { rank: 4, score: 0.85 }),
+          ],
+        }),
+    });
+
+    const result = await fetchRecommendations({ surface: "home", limit: 4 });
+    assert.equal(result.source, "api");
+    assert.equal(result.items.length, 1);
+    assert.equal(result.items[0].editId, 3);
+    assert.equal(result.items[0].score, 0.85);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Enforces requested limit client-side even if server over-returns", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -689,6 +795,107 @@ test("Real mounted React 19 hook integration test: rapid selections, delayed res
     assert.equal(last.state.source, "api");
 
     // 3. Unmount safely cancels in-flight work
+    await act(async () => {
+      root.unmount();
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Sequence guard prevents superseded delayed response that ignores cancellation from overwriting new selection", async () => {
+  const mockDoc = setupMinimalDom();
+  const originalFetch = globalThis.fetch;
+
+  try {
+    let capturedStates = [];
+    let resolveFirstRequest = null;
+
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      const editId = body.current_edit_id;
+
+      if (editId === 0) {
+        // First request ignores abort signal and hangs until manually resolved
+        return new Promise((resolve) => {
+          resolveFirstRequest = () => {
+            resolve({
+              ok: true,
+              json: async () =>
+                makeValidEnvelope({
+                  surface: "up_next",
+                  items: [
+                    makeValidItem(10, { rank: 1 }),
+                    makeValidItem(11, { rank: 2 }),
+                  ],
+                }),
+            });
+          };
+        });
+      }
+
+      // Second request resolves normally and quickly
+      return {
+        ok: true,
+        json: async () =>
+          makeValidEnvelope({
+            surface: "up_next",
+            items: [
+              makeValidItem(12, { rank: 1 }),
+              makeValidItem(13, { rank: 2 }),
+            ],
+          }),
+      };
+    };
+
+    function TestMountedComponent({ currentEditId }) {
+      const state = useRecommendations({
+        surface: "up_next",
+        currentEditId,
+        limit: 4,
+      });
+      capturedStates.push({ editId: currentEditId, state });
+      return null;
+    }
+
+    const container = mockDoc.createElement("div");
+    const root = createRoot(container);
+
+    // 1. Render with Edit 0 (initiates first request that hangs)
+    await act(async () => {
+      root.render(React.createElement(TestMountedComponent, { currentEditId: 0 }));
+    });
+
+    // 2. Switch to Edit 1 (supersedes first request and sends second request)
+    await act(async () => {
+      root.render(React.createElement(TestMountedComponent, { currentEditId: 1 }));
+    });
+
+    // Wait for Edit 1 request to finish
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    let current = capturedStates[capturedStates.length - 1];
+    assert.equal(current.editId, 1);
+    assert.equal(current.state.source, "api");
+    assert.deepEqual(current.state.edits.map((e) => e.id), [12, 13]);
+
+    // 3. Now let the first request (for Edit 0) complete late, ignoring that it was superseded
+    await act(async () => {
+      if (resolveFirstRequest) {
+        resolveFirstRequest();
+      }
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    // Verify that the stale delayed response for Edit 0 DID NOT overwrite Edit 1's results
+    current = capturedStates[capturedStates.length - 1];
+    assert.equal(current.editId, 1);
+    assert.equal(current.state.source, "api");
+    assert.deepEqual(current.state.edits.map((e) => e.id), [12, 13]);
+
+    // Cleanup
     await act(async () => {
       root.unmount();
     });
