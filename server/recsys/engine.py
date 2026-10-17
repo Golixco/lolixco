@@ -73,6 +73,7 @@ class RecommendationEngine:
             excluded_ids.add(request.current_edit_id)
 
         # 2. Candidate pool filtering
+        norm_required_tags = [t.strip().lower() for t in request.required_tags]
         eligible: List[EditItem] = [
             item
             for item in self.catalog.all_items
@@ -80,6 +81,13 @@ class RecommendationEngine:
             and (
                 request.category_filter is None
                 or item.category.lower() == request.category_filter.lower()
+            )
+            and (
+                not norm_required_tags
+                or all(
+                    req_tag in [t.lower() for t in item.tags]
+                    for req_tag in norm_required_tags
+                )
             )
         ]
 

@@ -6,6 +6,7 @@ name: Frontend CI
       - main
       - feat/discovery-ui-search
       - feat/recsys-baseline
+      - feat/mission5-recsys-integration
   pull_request:
     branches:
       - main
@@ -39,6 +40,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install Python API dependencies
+        run: pip install -r server/recsys/requirements.txt
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -59,3 +63,24 @@ jobs:
 
       - name: Run catalog drift validation
         run: python3 -m server.recsys.export_catalog --check
+
+      - name: Run recommendation API smoke test
+        run: |
+          python3 -m uvicorn server.recsys.api:app --host 127.0.0.1 --port 8000 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          # Bounded readiness polling (up to 15 seconds)
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:8000/api/v1/ready | grep -q '"status":"ready"'; then
+              echo "Server ready after $i polling intervals"
+              break
+            fi
+            sleep 0.5
+          done
+
+          curl -f http://127.0.0.1:8000/api/v1/health
+          curl -f http://127.0.0.1:8000/api/v1/ready
+          curl -f -X POST http://127.0.0.1:8000/api/v1/recommendations \
+            -H "Content-Type: application/json" \
+            -d '{"surface":"up_next","current_edit_id":0,"limit":2}'

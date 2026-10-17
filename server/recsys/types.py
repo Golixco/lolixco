@@ -1,5 +1,51 @@
 from dataclasses import dataclass, field
+from datetime import datetime
+import re
 from typing import Any, Optional, Sequence, Tuple
+
+
+RFC3339_REGEX = re.compile(
+    r"^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})$"
+)
+
+
+def validate_rfc3339_timestamp(val: str) -> str:
+    """Validate that val is a strict RFC3339 UTC/offset timestamp.
+
+    Rejects:
+    - Non-string or empty strings.
+    - Surrounding whitespace (leading or trailing whitespace is rejected, not normalized).
+    - Strings exceeding 35 characters (preventing DoS and unbounded error reflection).
+    - ISO week dates (e.g. 2026-W42-6T12:34:56+00:00).
+    - Space separators (e.g. 2026-10-17 12:34:56+00:00).
+    - Naive timestamps without timezone offset.
+    - Invalid calendar dates (e.g. 2026-02-31T12:00:00Z).
+    """
+    if type(val) is not str:
+        raise TypeError(f"Timestamp must be string, got {type(val).__name__}")
+    if not val:
+        raise ValueError("Timestamp cannot be empty")
+    if val != val.strip():
+        raise ValueError("Timestamp cannot contain leading or trailing whitespace")
+    if len(val) > 35:
+        raise ValueError("Timestamp exceeds maximum permitted length of 35 characters")
+
+    match = RFC3339_REGEX.match(val)
+    if not match:
+        raise ValueError(
+            "Timestamp must follow strict RFC3339 format with explicit timezone (e.g. '2026-10-17T12:00:00Z' or '2026-10-17T12:00:00+00:00')"
+        )
+
+    # Check calendar and time validity
+    iso_str = val.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            raise ValueError("Timestamp must include an explicit timezone offset")
+    except Exception as e:
+        raise ValueError(f"Invalid RFC3339 calendar date or time: {e}") from e
+
+    return val
 
 
 @dataclass(frozen=True)
@@ -68,15 +114,18 @@ class WatchHistoryEntry:
 
     edit_id: int
     unique_watch_ms: int
-    occurred_at: str  # ISO 8601 UTC timestamp
+    occurred_at: str  # RFC3339 / ISO 8601 UTC timestamp
 
     def __post_init__(self) -> None:
         if type(self.edit_id) is not int or self.edit_id < 0:
             raise TypeError(f"edit_id must be strict non-negative integer, got {type(self.edit_id).__name__}: {self.edit_id!r}")
         if type(self.unique_watch_ms) is not int or self.unique_watch_ms < 0:
             raise TypeError(f"unique_watch_ms must be non-negative integer, got {type(self.unique_watch_ms).__name__}: {self.unique_watch_ms!r}")
-        if type(self.occurred_at) is not str or not self.occurred_at.strip():
-            raise TypeError(f"occurred_at must be non-empty string, got {type(self.occurred_at).__name__}: {self.occurred_at!r}")
+        if self.unique_watch_ms > 3600000:
+            raise ValueError(f"unique_watch_ms exceeds maximum permitted 3600000ms (1hr), got {self.unique_watch_ms}")
+        if type(self.occurred_at) is not str:
+            raise TypeError(f"occurred_at must be string, got {type(self.occurred_at).__name__}: {self.occurred_at!r}")
+        validate_rfc3339_timestamp(self.occurred_at)
 
 
 CANONICAL_CATEGORIES: tuple[str, ...] = (
@@ -99,6 +148,7 @@ class RecommendationRequest:
     exclude_edit_ids: tuple[int, ...] = ()
     history: tuple[WatchHistoryEntry, ...] = ()
     category_filter: Optional[str] = None
+    required_tags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.surface not in ("home", "up_next"):
@@ -135,6 +185,16 @@ class RecommendationRequest:
                 raise ValueError(
                     f"Unknown category_filter {self.category_filter!r}. Must be one of canonical categories: {CANONICAL_CATEGORIES}"
                 )
+
+        if not isinstance(self.required_tags, (tuple, list)):
+            raise TypeError(f"required_tags must be sequence of strings, got {type(self.required_tags).__name__}")
+        if len(self.required_tags) > 10:
+            raise ValueError(f"At most 10 required_tags permitted, got {len(self.required_tags)}")
+        for t in self.required_tags:
+            if type(t) is not str or not t.strip():
+                raise TypeError(f"Each required tag must be non-empty string, got {t!r}")
+            if len(t.strip()) > 64:
+                raise ValueError(f"Tag exceeds maximum length 64 characters: {t!r}")
 
 
 @dataclass(frozen=True)
