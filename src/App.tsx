@@ -7,6 +7,7 @@ import ImmersionBanner from "./components/home/ImmersionBanner";
 import VideoPlayer from "./components/video/VideoPlayer";
 import { edits, type Edit } from "./data/edits";
 import { useDiscoveryFeed } from "./hooks/useDiscoveryFeed";
+import { useRecommendations } from "./hooks/useRecommendations";
 export default function App() {
   const [expanded, setExpanded] = useState(() => innerWidth >= 1440),
     [mobile, setMobile] = useState(() => innerWidth < 768),
@@ -49,6 +50,15 @@ export default function App() {
     else setModal(name);
   }
   const { edits: filtered, loading } = useDiscoveryFeed(edits, query, category);
+  const { edits: upNextEdits } = useRecommendations({
+    surface: "up_next",
+    currentEditId: selected.id,
+    limit: 4,
+  });
+  const { edits: homeRecommendedEdits } = useRecommendations({
+    surface: "home",
+    limit: 6,
+  });
   const browsing = !!query || category !== "Featured" || active === "Explore";
   const auth = ["Sign In", "Sign Up"].includes(modal);
   const messages: Record<string, string> = {
@@ -102,17 +112,14 @@ export default function App() {
               <VideoPlayer key={selected.id} edit={selected} />
               <section className="up-next">
                 <h2>Up Next</h2>
-                {edits
-                  .filter((e) => e.id !== selected.id)
-                  .slice(0, 4)
-                  .map((e) => (
-                    <VideoCard key={e.id} compact edit={e} onSelect={choose} />
-                  ))}
+                {upNextEdits.map((e) => (
+                  <VideoCard key={e.id} compact edit={e} onSelect={choose} />
+                ))}
               </section>
             </div>
             <ContentSection
-              title="Popular Right Now"
-              items={edits.slice(5, 11)}
+              title="Recommended Edits"
+              items={homeRecommendedEdits}
               onSelect={choose}
             />
             <ImmersionBanner onOpen={() => setModal("Immersion")} />
