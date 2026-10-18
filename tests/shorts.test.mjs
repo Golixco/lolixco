@@ -2052,3 +2052,142 @@ test("V4 REFRESH: Home → Short 100 → Next 101 → refresh/remount preserving
   await dom.cleanup();
 });
 
+test("V4 DIRECT-LINK: Direct link to Short 100 → Next 101 (viewerDepth=1) → Close → Home → Back → Forward", async () => {
+  const dom = setupMountedDom("http://localhost:3000/?short=100");
+
+  await act(async () => {
+    dom.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // 1. Direct link to Short 100
+  assert.equal(dom.historyState.search, "?short=100");
+  assert.equal(dom.historyState.pointer, 0);
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 1);
+  assert.ok(dom.container.textContent.includes("Shadow Strike"));
+  assert.equal(dom.historyState.state?.viewerSessionId, undefined);
+
+  // 2. Navigate to Short 101
+  const nextBtn = findElementsByAriaLabel(dom.container, "Next short")[0];
+  assert.ok(nextBtn, "Next button must exist");
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(dom.historyState.search, "?short=101");
+  assert.equal(dom.historyState.pointer, 1);
+  assert.ok(dom.container.textContent.includes("Domain Expansion"));
+
+  const session = dom.historyState.state?.viewerSessionId;
+  assert.ok(session, "Must have created session id");
+  assert.equal(
+    dom.historyState.state?.viewerDepth,
+    1,
+    "viewerDepth must be 1 (not 2) because only 1 history entry was pushed in this session"
+  );
+  assert.equal(
+    dom.historyState.state?.hasInAppOrigin,
+    false,
+    "hasInAppOrigin must be false for direct-link session"
+  );
+
+  // 3. Close the viewer
+  const closeBtn = findElementsByAriaLabel(dom.container, "Close shorts viewer")[0];
+  assert.ok(closeBtn, "Close button must exist");
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // 4. Confirm visitor remains within the intended Lolixco browsing experience
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 0, "Viewer must be closed");
+  assert.equal(dom.historyState.pointer, 1, "Must stay at pointer 1 via replaceState without jumping out of app");
+  assert.equal(dom.historyState.search, "", "URL must be cleaned of ?short=");
+  assert.equal(dom.historyState.state?.viewerSessionId, undefined, "Viewer session state must be cleared");
+  assert.ok(
+    dom.container.textContent.includes("Gojo vs Sukuna") || dom.container.textContent.includes("Curated Shorts"),
+    "Visitor remains within intended Lolixco browsing experience"
+  );
+
+  // 5. Verify browser Back/Forward behaves predictably
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(dom.historyState.pointer, 0, "Back must return to pointer 0 (Short 100)");
+  assert.equal(dom.historyState.search, "?short=100");
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 1, "Shorts viewer reopens on Back");
+  assert.ok(dom.container.textContent.includes("Shadow Strike"));
+
+  await act(async () => {
+    globalThis.history.forward();
+  });
+  assert.equal(dom.historyState.pointer, 1, "Forward must return to pointer 1 (Home)");
+  assert.equal(dom.historyState.search, "");
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 0, "Viewer must be closed on Forward");
+
+  await dom.cleanup();
+});
+
+test("V4 DIRECT-LINK REFRESH: Direct link to Short 100 → Next 101 → refresh Short 101 → Close → Home → Back", async () => {
+  const dom = setupMountedDom("http://localhost:3000/?short=100");
+
+  await act(async () => {
+    dom.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // 1. Direct link to Short 100
+  assert.equal(dom.historyState.search, "?short=100");
+  assert.equal(dom.historyState.pointer, 0);
+
+  // 2. Navigate to Short 101
+  const nextBtn = findElementsByAriaLabel(dom.container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(dom.historyState.search, "?short=101");
+  assert.equal(dom.historyState.pointer, 1);
+  const session1 = dom.historyState.state?.viewerSessionId;
+  assert.ok(session1);
+  assert.equal(dom.historyState.state?.viewerDepth, 1);
+  assert.equal(dom.historyState.state?.hasInAppOrigin, false);
+
+  // 3. Refresh Short 101
+  await dom.remount();
+  await act(async () => {
+    dom.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  assert.equal(dom.historyState.search, "?short=101");
+  assert.equal(dom.historyState.pointer, 1);
+  assert.equal(dom.historyState.state?.viewerSessionId, session1);
+  assert.equal(dom.historyState.state?.viewerDepth, 1);
+  assert.equal(dom.historyState.state?.hasInAppOrigin, false);
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 1);
+  assert.ok(dom.container.textContent.includes("Domain Expansion"));
+
+  // 4. Close the viewer
+  const closeBtn = findElementsByAriaLabel(dom.container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // Confirm visitor remains in Lolixco Home
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 0, "Viewer must be closed");
+  assert.equal(dom.historyState.pointer, 1, "Must remain at pointer 1 via replaceState");
+  assert.equal(dom.historyState.search, "");
+  assert.ok(
+    dom.container.textContent.includes("Gojo vs Sukuna") || dom.container.textContent.includes("Curated Shorts"),
+    "Visitor remains within intended Lolixco browsing experience"
+  );
+
+  // 5. Browser Back
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(dom.historyState.pointer, 0, "Back must return to pointer 0 (Short 100)");
+  assert.equal(dom.historyState.search, "?short=100");
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 1, "Shorts viewer reopens on Back");
+  assert.ok(dom.container.textContent.includes("Shadow Strike"));
+
+  await dom.cleanup();
+});
+

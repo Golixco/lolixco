@@ -148,10 +148,11 @@ export function syncUrl(
       : {};
 
   let nextState: Record<string, unknown> | null = null;
-  if (stateUpdate === null) {
+  if (stateUpdate === null || (shortId === null && stateUpdate === undefined)) {
     const cleaned = { ...existingState };
     delete cleaned.viewerSessionId;
     delete cleaned.viewerDepth;
+    delete cleaned.hasInAppOrigin;
     nextState = Object.keys(cleaned).length > 0 ? cleaned : null;
   } else if (stateUpdate !== undefined) {
     nextState = { ...existingState, ...stateUpdate };
@@ -415,6 +416,7 @@ export default function App({
       syncUrl(category, fandom, query, active, short.id, true, {
         viewerSessionId: newSessionId,
         viewerDepth: 1,
+        hasInAppOrigin: true,
       });
     },
     [active, category, fandom, query]
@@ -423,25 +425,35 @@ export default function App({
   // Synchronize Next / Previous inside ShortsViewer with URL and activeShort
   const handleShortChange = useCallback(
     (newShort: Edit) => {
-      let sessionId = viewerSessionIdRef.current;
-      if (!sessionId) {
-        sessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
-        viewerSessionIdRef.current = sessionId;
-      }
       const curState =
         typeof window !== "undefined" ? window.history?.state : null;
-      const curDepth =
+      const hasInAppOrigin = Boolean(
+        curState && curState.hasInAppOrigin === true
+      );
+
+      let sessionId = viewerSessionIdRef.current;
+      const isExistingSession = Boolean(
+        sessionId &&
         curState &&
         curState.viewerSessionId === sessionId &&
         typeof curState.viewerDepth === "number"
-          ? curState.viewerDepth
-          : 1;
+      );
+
+      if (!sessionId || !isExistingSession) {
+        sessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+        viewerSessionIdRef.current = sessionId;
+      }
+
+      const curDepth = isExistingSession
+        ? (curState!.viewerDepth as number)
+        : (hasInAppOrigin ? 1 : 0);
       const nextDepth = curDepth + 1;
 
       setActiveShort(newShort);
       syncUrl(category, fandom, query, active, newShort.id, true, {
         viewerSessionId: sessionId,
         viewerDepth: nextDepth,
+        hasInAppOrigin,
       });
     },
     [active, category, fandom, query]
@@ -457,6 +469,9 @@ export default function App({
 
     const curState =
       typeof window !== "undefined" ? window.history?.state : null;
+    const hasInAppOrigin = Boolean(
+      curState && curState.hasInAppOrigin === true
+    );
     const isAppSession =
       viewerSessionIdRef.current &&
       curState &&
@@ -464,7 +479,7 @@ export default function App({
       typeof curState.viewerDepth === "number" &&
       curState.viewerDepth > 0;
 
-    if (isAppSession) {
+    if (isAppSession && hasInAppOrigin) {
       const depthToGo = curState.viewerDepth;
       viewerSessionIdRef.current = null;
       if (
@@ -497,6 +512,7 @@ export default function App({
     if (name === "Home") {
       setActive("Home");
       setActiveShort(null);
+      viewerSessionIdRef.current = null;
       setQuery("");
       setCategory("All");
       setFandom("");
@@ -504,6 +520,7 @@ export default function App({
     } else if (name === "Explore") {
       setActive("Explore");
       setActiveShort(null);
+      viewerSessionIdRef.current = null;
       setQuery("");
       setCategory("All");
       setFandom("");
@@ -521,6 +538,7 @@ export default function App({
         syncUrl("All", "", "", "Shorts", firstShort.id, true, {
           viewerSessionId: newSessionId,
           viewerDepth: 1,
+          hasInAppOrigin: true,
         });
       } else {
         setActiveShort(null);
