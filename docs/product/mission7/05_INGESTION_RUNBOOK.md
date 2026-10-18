@@ -86,7 +86,7 @@ Execute final pre-publication gate:
 ```bash
 npm run check:content -- --manifest content/manifest.json --mode publish
 ```
-*Expected output:* Enforces that `reviewStatus` is `"approved"` or `"published"`, `rightsCleared` is `true`, staged assets are verified, and physical video streams are certified via ffprobe (dimensions, genuine 9:16 portrait ratio for Shorts, codecs, and tolerances). **Fails closed** with fatal error if ffprobe is unavailable or streams are undecodable.
+*Expected output:* Enforces that `reviewStatus` is `"approved"` or `"published"`, `rightsCleared` is `true`, staged assets are verified, physical video streams are certified via ffprobe (aspect ratios, container duration fallback, audio presence/codec, tolerances), and entire video files pass full playback decode integrity verification via FFmpeg (`ffmpeg -v error -xerror -i <file> -f null -`). **Fails closed** with fatal error if ffprobe or ffmpeg is unavailable in the environment, or if any stream fails decode verification.
 
 ---
 

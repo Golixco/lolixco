@@ -20,15 +20,19 @@
 | **DEC-714** | Resolved Realpath Containment | Asset containment checks resolve real filesystem targets (`realpathSync`) to block symlinks inside `public/media/` from escaping permitted directories. | Eliminates symlink escape bypasses while preserving valid local media paths. |
 | **DEC-715** | Safe-by-Default Projection | `projectToPublicEdit(item)` defaults to strict publication clearance without requiring optional safety flags. Separate `projectToPreviewEdit(item)` is provided for non-public preview. | Eliminates risk of developers omitting safety flags and projecting unapproved records to public bundles. |
 | **DEC-716** | Strict CLI Mode Validation | Validator CLI and programmatic API strictly validate `--mode` (accepting only `metadata`, `assets`, `publish`). Unsupported modes exit with non-zero code. | Prevents misconfigured CI scripts or typoed flags from skipping critical quality checks. |
+| **DEC-717** | Full Decode Playback-Integrity Verification | Publication readiness requires successful full bitstream decoding via FFmpeg (`ffmpeg -v error -xerror -i <file> -f null -`). | Crucially distinguishes stream metadata from playable video. Prevents truncated or corrupted files from being certified merely because headers are intact. |
+| **DEC-718** | Physical Stream Property Reconciliation | Reconciles declared aspect ratios against actual dimensions, uses container `format.duration` fallback for WebM, validates audio-stream presence and codecs, and cross-checks duration within documented tolerances. | Catches dimension/codec contradictions (e.g. 16:9 declared as 4:3, missing audio declared as AAC, 1s video declared as 2:55) and prevents silent certification. |
+| **DEC-719** | Authoritative Schema Entry Point Enforcement | `validateContentManifest()` invokes `validateJsonSchema()` at its primary entry point. Strict RFC 3339 calendar-day validation ensures agreement with Python `Draft7Validator`. | Eliminates discrepancies between JSON Schema, runtime validation, and CLI commands. |
 
 ---
 
 ## 2. Intentional Limitations and Tool Dependencies
 
-1. **FFprobe Dependency for Physical Stream Certification:**
-   - In publication mode (`--mode publish`), `ffprobe` is **mandatory**. If ffprobe is unavailable or fails on an undecodable stream, publication validation fails closed with a fatal error.
-   - In asset staging mode (`--mode assets`), missing ffprobe reports `streamInspection: "INCOMPLETE (ffprobe unavailable; technical stream inspection incomplete)"` without claiming publication readiness.
-   - In metadata preparation mode (`--mode metadata`), physical stream checks are skipped, keeping metadata linting 100% usable without ffprobe.
+1. **FFprobe & FFmpeg Dependencies for Publication Readiness:**
+   - In publication mode (`--mode publish`), `ffprobe` (for stream metadata inspection) and `ffmpeg` (for full decode playback-integrity verification) are **mandatory**.
+   - If either tool is unavailable in the environment, or if a stream fails decode or metadata extraction, publication validation strictly **fails closed** (`valid: false`) reporting `INCOMPLETE (... unavailable in environment; publication blocked)`. Incomplete verification is never approved for publication.
+   - In asset staging mode (`--mode assets`), missing tools report `INCOMPLETE` as warnings without blocking file staging.
+   - In metadata preparation mode (`--mode metadata`), physical stream and decode checks are skipped, keeping metadata linting 100% usable without media toolchains.
 2. **Offline-Only Media Validation:**
    - External URLs (`https://...`) are permitted during metadata intake but flagged during asset verification because remote files cannot be verified offline. Production content is required to be staged in local `/media/` directories.
 
@@ -62,8 +66,8 @@ All verification gates have been executed on branch `feat/mission7a-content-inge
 
 1. **Frontend Unit & Integration Tests:**
    - Command: `npm test`
-   - Result: **161 passed (0 failed)** across 10 test files.
-   - Includes 34 comprehensive tests in [`tests/content-validation.test.mjs`](file:///home/vuld0/Lolixco/tests/content-validation.test.mjs) verifying schema validation, malformed types, fail-closed stream inspection, MP4 header-stub rejection, symlink escape prevention, safe-by-default projection, CLI mode rejection, ID allocation, and live catalog invariants.
+   - Result: **172 passed (0 failed)** across 10 test files.
+   - Includes 44 comprehensive tests in [`tests/content-validation.test.mjs`](file:///home/vuld0/Lolixco/tests/content-validation.test.mjs) verifying schema validation, entry-point JSON Schema enforcement, malformed types, fail-closed stream inspection, MP4 header-stub rejection, full decode playback-integrity verification, truncated media regression, physical stream property reconciliation (16:9 vs 4:3, container duration fallback, audio presence and codecs, duration tolerances), symlink escape prevention, safe-by-default projection, CLI mode rejection, ID allocation, and live catalog invariants.
 2. **TypeScript Compilation:**
    - Command: `npm run typecheck`
    - Result: **0 type errors**.

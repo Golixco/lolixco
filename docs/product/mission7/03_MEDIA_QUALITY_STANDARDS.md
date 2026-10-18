@@ -80,7 +80,7 @@ Posters serve as preview cards on discovery feeds, search results, and video pla
 
 ## 5. Media Validation Protocols
 
-When owner media assets are staged, they are subject to automated verification at two levels:
+When owner media assets are staged, they are subject to automated verification across three distinct tiers:
 
 ### 5.1 Local Deterministic Validation (`scripts/validate-content.mjs`)
 Implemented in Node.js with zero external runtime dependencies:
@@ -95,14 +95,25 @@ Implemented in Node.js with zero external runtime dependencies:
   - `.webm`: EBML header ID `1a45dfa3`.
   - `.mp4` / `.m4v`: ISO Base Media File Format `ftyp` box at byte offset 4 (`66747970`).
 
-### 5.2 Deep Media Stream Inspection & Fail-Closed Publication Enforcement
-- **Fail-Closed Publication Readiness:** A valid file header (magic bytes) alone is insufficient for publication. Publication readiness mode (`--mode publish`) strictly requires successful media stream inspection. Missing, unreadable, corrupted, or undecodable video streams are fatal validation errors.
-- **FFprobe Availability Requirement:** If `ffprobe` is not installed in the environment during publication validation, publication readiness **strictly fails closed** with a fatal error. Stream inspection is never marked as `OK` when no valid stream was inspected.
-- **Metadata Intake Decoupling:** Metadata preparation (`--mode metadata`) remains 100% usable without ffprobe, allowing metadata editing and schema linting on machines without media toolchains.
-- **Asset Staging Technical Reporting:** Staged asset verification (`--mode assets`) reports technical stream inspection separately as `streamInspection: "INCOMPLETE (ffprobe unavailable...)"`, verifying byte signatures without claiming publication readiness.
-- **Genuine Portrait Aspect Ratio for Shorts:** For vertical Shorts (`format: "short"`), the validator enforces a genuine `9:16` aspect ratio (target `height / width` = 1.777, allowed tolerance `1.70` to `1.86`). Tall non-standard shapes (such as `1080x1081`) that merely satisfy `height > width` are strictly rejected.
-- **Declared Metadata Consistency:**
-  - **Dimensions:** Actual video stream width and height must match declared `media.width` and `media.height`.
-  - **Codec:** Normalized stream codec (e.g. `avc1` / `h264`, `hevc` / `h265`) must match declared `media.codec`.
-  - **Frame Rate:** Actual frame rate must match declared `media.frameRate` within documented tolerance (±0.5 fps, accounting for NTSC drop-frame rates like 23.976 vs 24 or 59.94 vs 60).
-  - **Duration:** Actual container stream duration must match declared `duration` within documented tolerance (±3.0 seconds, accounting for container cut priming and metadata headers).
+### 5.2 Technical Stream Metadata Inspection (`ffprobe`)
+Queries stream metadata and container format descriptors to reconcile declared metadata with physical stream properties:
+- **Container Duration Fallback:** Formats such as WebM/Matroska store media duration in EBML Segment information (`format.duration`) rather than in elementary stream packets. The inspector automatically falls back to container format duration when stream duration is absent, preventing duration checks from being bypassed.
+- **Aspect Ratio & Resolution Reconciliation:**
+  - Actual stream width and height are cross-checked against declared `media.aspectRatio` (`16:9`, `4:3`, `9:16`, `2.39:1`). Actual 16:9 footage declared as 4:3 (or vice versa) is strictly rejected.
+  - Declared `media.width` and `media.height` are cross-checked against declared `media.aspectRatio` even during metadata intake.
+  - Vertical Shorts (`format: "short"`) enforce a genuine `9:16` ratio (target `height / width` ~ 1.777, tolerance `1.70` to `1.86`).
+- **Audio Stream & Codec Verification:**
+  - When `media.audioCodec` is declared as `"aac"`, `"opus"`, or `"mp3"`, the validator confirms the physical presence of an audio stream and verifies that its normalized codec matches the declared codec.
+  - If a file has no audio stream, declaring an audio codec is rejected.
+  - If a file contains audio, declaring `media.audioCodec: "none"` is rejected.
+- **Duration Cross-Checks & Tolerances:**
+  - `record.duration` (display string, M:SS) is cross-checked against `record.durationMs` within ±1.0s tolerance. Contradictory values (e.g. `0:01` with `durationMs: 175000`) are rejected immediately.
+  - Measured stream duration is cross-checked against declared `duration` and `durationMs` within ±3.0s tolerance.
+  - **No Silent Certification:** If a required physical measurement cannot be obtained during publication mode, validation fails closed with a fatal error rather than silently certifying the file.
+
+### 5.3 Full Playback Decode Integrity Verification (`ffmpeg`)
+Crucially distinguished from stream metadata inspection: a truncated or partially written media file may retain sufficient container and track headers for `ffprobe` to report stream codecs and dimensions, yet fail completely when a video decoder attempts to render frames.
+- **Full Bitstream Decode to Null Sink:** Publication readiness (`--mode publish`) executes an FFmpeg decode pass across the entire file (`ffmpeg -v error -xerror -i <file> -f null -`). Any non-zero exit code or decode error output is treated as a fatal publication failure.
+- **Fail-Closed Tool Availability:** If `ffmpeg` or `ffprobe` is not installed or available in the environment during publication validation, the validator reports `decodeVerification: "INCOMPLETE (ffmpeg unavailable in environment; publication blocked)"` and `streamInspection: "INCOMPLETE (ffprobe unavailable in environment; publication blocked)"`, failing closed (`valid: false`). Incomplete verification is never approved for publication.
+- **Preservation of Fast Intake Modes:** Faster metadata preparation (`--mode metadata`) and asset staging (`--mode assets`) modes remain fast and unblocked by decode verification, allowing offline metadata authoring and asset file staging without requiring full-length bitstream decoding.
+

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync, unlinkSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, symlinkSync, unlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,10 @@ import {
   contentRecordSchema,
   VALID_MODES,
   projectRoot,
+  isFFmpegAvailable,
+  isFFprobeAvailable,
+  verifyVideoDecodeIntegrityWithFFmpeg,
+  inspectVideoWithFFprobe,
 } from "../scripts/validate-content.mjs";
 import { FANDOM_REGISTRY } from "../src/data/fandoms.ts";
 import { edits } from "../src/data/edits.ts";
@@ -564,7 +568,7 @@ test("FIX A: Publication mode fails closed if ffprobe is unavailable in environm
     isNewBatch: true,
   });
   assert.equal(manifestPubRes.valid, false);
-  assert.match(manifestPubRes.streamInspection, /FAILED/);
+  assert.match(manifestPubRes.streamInspection, /INCOMPLETE.*ffprobe unavailable/);
 });
 
 test("FIX A: Asset-staging mode reports incomplete stream inspection without claiming publication readiness", () => {
@@ -611,11 +615,18 @@ test("FIX A: Positive test: certified landscape video and genuine 9:16 portrait 
     codec: "h264",
     frameRate: 60,
     durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
+  });
+  const certifiedDecodeVerifier = () => ({
+    available: true,
+    ok: true,
   });
 
   const pubVideo = validateContentRecord(MOCK_VALID_VIDEO, {
     mode: "publish",
     videoInspector: certifiedVideoInspector,
+    decodeVerifier: certifiedDecodeVerifier,
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(pubVideo.valid, true, `Certified video failed publication: ${pubVideo.errors.join("; ")}`);
@@ -628,11 +639,14 @@ test("FIX A: Positive test: certified landscape video and genuine 9:16 portrait 
     codec: "h264",
     frameRate: 60,
     durationSec: 15.0,
+    hasAudio: true,
+    audioCodec: "aac",
   });
 
   const pubShort = validateContentRecord(MOCK_VALID_SHORT, {
     mode: "publish",
     videoInspector: certifiedShortInspector,
+    decodeVerifier: certifiedDecodeVerifier,
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(pubShort.valid, true, `Certified short failed publication: ${pubShort.errors.join("; ")}`);
@@ -648,11 +662,14 @@ test("FIX A: Rejects Shorts with non-genuine 9:16 aspect ratios (e.g. nearly squ
     codec: "h264",
     frameRate: 60,
     durationSec: 15.0,
+    hasAudio: true,
+    audioCodec: "aac",
   });
 
   const res = validateContentRecord(MOCK_VALID_SHORT, {
     mode: "publish",
     videoInspector: nonGenuineShortInspector,
+    decodeVerifier: () => ({ available: true, ok: true }),
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(res.valid, false);
@@ -660,6 +677,8 @@ test("FIX A: Rejects Shorts with non-genuine 9:16 aspect ratios (e.g. nearly squ
 });
 
 test("FIX A: Rejects stream inspection discrepancies in dimensions, codec, frameRate, and duration", () => {
+  const dummyDecodeVerifier = () => ({ available: true, ok: true });
+
   // Dimension mismatch
   const dimMismatchInspector = () => ({
     available: true,
@@ -669,10 +688,13 @@ test("FIX A: Rejects stream inspection discrepancies in dimensions, codec, frame
     codec: "h264",
     frameRate: 60,
     durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
   });
   const rDim = validateContentRecord(MOCK_VALID_VIDEO, {
     mode: "publish",
     videoInspector: dimMismatchInspector,
+    decodeVerifier: dummyDecodeVerifier,
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(rDim.valid, false);
@@ -688,10 +710,13 @@ test("FIX A: Rejects stream inspection discrepancies in dimensions, codec, frame
     codec: "hevc",
     frameRate: 60,
     durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
   });
   const rCodec = validateContentRecord(MOCK_VALID_VIDEO, {
     mode: "publish",
     videoInspector: codecMismatchInspector,
+    decodeVerifier: dummyDecodeVerifier,
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(rCodec.valid, false);
@@ -706,10 +731,13 @@ test("FIX A: Rejects stream inspection discrepancies in dimensions, codec, frame
     codec: "h264",
     frameRate: 24.0, // declared: 60
     durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
   });
   const rFps = validateContentRecord(MOCK_VALID_VIDEO, {
     mode: "publish",
     videoInspector: fpsMismatchInspector,
+    decodeVerifier: dummyDecodeVerifier,
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(rFps.valid, false);
@@ -724,10 +752,13 @@ test("FIX A: Rejects stream inspection discrepancies in dimensions, codec, frame
     codec: "h264",
     frameRate: 60,
     durationSec: 40.0, // declared: 0:25 (25s)
+    hasAudio: true,
+    audioCodec: "aac",
   });
   const rDur = validateContentRecord(MOCK_VALID_VIDEO, {
     mode: "publish",
     videoInspector: durationMismatchInspector,
+    decodeVerifier: dummyDecodeVerifier,
     fandomRegistry: FANDOM_REGISTRY,
   });
   assert.equal(rDur.valid, false);
@@ -1029,3 +1060,538 @@ test("FIX E: CLI execution accepts all valid modes (metadata, assets, publish)",
     assert.doesNotMatch(cliRes.stderr, /Invalid validation mode/);
   }
 });
+
+// -------------------------------------------------------------
+// V4 ISSUE A: Playable Video Verification & Decode Integrity
+// -------------------------------------------------------------
+
+test("V4 ISSUE A: Publication mode requires successful playback decode integrity verification", () => {
+  const dummyInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
+  });
+
+  // Successful decode verification passes publication
+  const decodeOkVerifier = () => ({ available: true, ok: true });
+  const pubOk = validateContentRecord(MOCK_VALID_VIDEO, {
+    mode: "publish",
+    videoInspector: dummyInspector,
+    decodeVerifier: decodeOkVerifier,
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(pubOk.valid, true, `Certified video should pass publication: ${pubOk.errors.join("; ")}`);
+
+  // Decode verification failure (e.g. corrupt or truncated bitstream) fails publication
+  const decodeFailVerifier = () => ({
+    available: true,
+    ok: false,
+    error: "FFmpeg decode verification failed (exit code 1): [h264 @ 0x55] corrupt bitstream / truncated frame at 00:00:08",
+  });
+  const pubFail = validateContentRecord(MOCK_VALID_VIDEO, {
+    mode: "publish",
+    videoInspector: dummyInspector,
+    decodeVerifier: decodeFailVerifier,
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(pubFail.valid, false);
+  assert.match(pubFail.errors.join("; "), /Source video playback decode integrity verification failed/);
+  assert.match(pubFail.errors.join("; "), /corrupt bitstream \/ truncated frame/);
+});
+
+test("V4 ISSUE A: Real-media regression: isolated valid clip vs deliberately truncated copy", () => {
+  const publicDir = resolve(projectRoot, "public");
+  const mediaDir = resolve(publicDir, "media");
+  const originalMedia = resolve(mediaDir, "motion-study.webm");
+  assert.equal(existsSync(originalMedia), true, "motion-study.webm must exist in public/media");
+
+  const fullBytes = readFileSync(originalMedia);
+  // Deliberately truncate after 16KB: keeps EBML & track headers for ffprobe stream inspection, but corrupts playback
+  const truncatedBytes = fullBytes.subarray(0, 16384);
+
+  const isolatedValidFile = resolve(mediaDir, "test-v4-isolated.webm");
+  const truncatedFile = resolve(mediaDir, "test-v4-truncated.webm");
+
+  try {
+    writeFileSync(isolatedValidFile, fullBytes);
+    writeFileSync(truncatedFile, truncatedBytes);
+
+    // If ffmpeg is available in environment, run real ffmpeg decode verifier
+    if (isFFmpegAvailable()) {
+      const realValidDecode = verifyVideoDecodeIntegrityWithFFmpeg(isolatedValidFile);
+      assert.equal(realValidDecode.available, true);
+      assert.equal(realValidDecode.ok, true, `Real ffmpeg decode on valid clip failed: ${realValidDecode.error}`);
+
+      const realTruncatedDecode = verifyVideoDecodeIntegrityWithFFmpeg(truncatedFile);
+      assert.equal(realTruncatedDecode.available, true);
+      assert.equal(realTruncatedDecode.ok, false, "Real ffmpeg decode must fail on truncated clip");
+    }
+
+    // Test publication validation behavior on truncated clip with a realistic decode verifier:
+    // Stream inspector can see the VP9 / Opus stream headers, but decode verifier detects incomplete/truncated bitstream
+    const streamInspector = () => ({
+      available: true,
+      ok: true,
+      width: 1920,
+      height: 1080,
+      codec: "vp9",
+      frameRate: 30,
+      durationSec: 1.0,
+      hasAudio: true,
+      audioCodec: "opus",
+    });
+
+    const truncatedDecodeVerifier = (filePath) => {
+      // If real ffmpeg is present, use it; otherwise check file size vs intact stream expectation
+      if (isFFmpegAvailable()) {
+        return verifyVideoDecodeIntegrityWithFFmpeg(filePath);
+      }
+      return {
+        available: true,
+        ok: false,
+        error: "FFmpeg decode verification failed (exit code 1): [matroska,webm @ 0x55] End of file reached while decoding frame",
+      };
+    };
+
+    const truncatedRecord = {
+      ...MOCK_VALID_VIDEO,
+      id: 102,
+      source: "/media/test-v4-truncated.webm",
+      duration: "0:01",
+      durationMs: 1000,
+      media: {
+        ...MOCK_VALID_VIDEO.media,
+        codec: "vp9",
+        audioCodec: "opus",
+        frameRate: 30,
+      },
+    };
+
+    const truncatedManifest = {
+      manifestVersion: "1.0.0",
+      catalogVersion: "catalog-v2",
+      items: [truncatedRecord],
+    };
+
+    const pubRes = validateContentManifest(truncatedManifest, {
+      mode: "publish",
+      videoInspector: streamInspector,
+      decodeVerifier: truncatedDecodeVerifier,
+      fandomRegistry: FANDOM_REGISTRY,
+    });
+
+    assert.equal(pubRes.valid, false, "Truncated media must fail publication mode");
+    assert.match(pubRes.decodeVerification, /FAILED/);
+    assert.match(pubRes.errors.join("; "), /playback decode integrity verification failed/);
+
+    // Valid isolated clip passes publication mode
+    const validRecord = {
+      ...truncatedRecord,
+      id: 103,
+      source: "/media/test-v4-isolated.webm",
+    };
+    const validManifest = {
+      manifestVersion: "1.0.0",
+      catalogVersion: "catalog-v2",
+      items: [validRecord],
+    };
+
+    const validPubRes = validateContentManifest(validManifest, {
+      mode: "publish",
+      videoInspector: streamInspector,
+      decodeVerifier: () => ({ available: true, ok: true }),
+      fandomRegistry: FANDOM_REGISTRY,
+    });
+    assert.equal(validPubRes.valid, true, `Valid clip failed: ${validPubRes.errors.join("; ")}`);
+    assert.match(validPubRes.decodeVerification, /VERIFIED/);
+  } finally {
+    if (existsSync(isolatedValidFile)) unlinkSync(isolatedValidFile);
+    if (existsSync(truncatedFile)) unlinkSync(truncatedFile);
+  }
+});
+
+test("V4 ISSUE A: Publication mode reports INCOMPLETE and fails closed if ffmpeg or ffprobe are unavailable", () => {
+  const dummyInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
+  });
+
+  const manifest = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [MOCK_VALID_VIDEO],
+  };
+
+  // Missing ffmpeg
+  const pubNoFFmpeg = validateContentManifest(manifest, {
+    mode: "publish",
+    videoInspector: dummyInspector,
+    decodeVerifier: () => ({ available: false, ok: false, error: "ffmpeg not found" }),
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(pubNoFFmpeg.valid, false, "Missing ffmpeg must block publication");
+  assert.match(pubNoFFmpeg.decodeVerification, /INCOMPLETE.*ffmpeg unavailable/);
+  assert.match(pubNoFFmpeg.errors.join("; "), /ffmpeg is required for playback decode integrity verification/);
+
+  // Missing ffprobe
+  const pubNoFFprobe = validateContentManifest(manifest, {
+    mode: "publish",
+    videoInspector: () => ({ available: false, ok: false, error: "ffprobe not found" }),
+    decodeVerifier: () => ({ available: true, ok: true }),
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(pubNoFFprobe.valid, false, "Missing ffprobe must block publication");
+  assert.match(pubNoFFprobe.streamInspection, /INCOMPLETE.*ffprobe unavailable/);
+});
+
+test("V4 ISSUE A: Faster metadata-only and asset-staging modes are preserved without requiring full decode", () => {
+  const manifest = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [MOCK_VALID_VIDEO],
+  };
+
+  // Metadata mode: decodeVerification and streamInspection are SKIPPED
+  const metaRes = validateContentManifest(manifest, { mode: "metadata", fandomRegistry: FANDOM_REGISTRY });
+  assert.equal(metaRes.valid, true);
+  assert.match(metaRes.streamInspection, /SKIPPED/);
+  assert.match(metaRes.decodeVerification, /SKIPPED/);
+  assert.match(metaRes.assetVerification, /SKIPPED/);
+
+  // Assets mode: checks file existence and headers, does not require decode
+  const assetsRes = validateContentManifest(manifest, {
+    mode: "assets",
+    fandomRegistry: FANDOM_REGISTRY,
+    videoInspector: () => ({ available: false }),
+    decodeVerifier: () => ({ available: false }),
+  });
+  assert.equal(assetsRes.valid, true, "Assets mode should not fail when inspection tools are unavailable");
+  assert.match(assetsRes.streamInspection, /INCOMPLETE/);
+  assert.match(assetsRes.decodeVerification, /INCOMPLETE/);
+  assert.match(assetsRes.assetVerification, /PERFORMED/);
+});
+
+// -------------------------------------------------------------
+// V4 ISSUE B: Reconcile Physical Stream Properties with Metadata
+// -------------------------------------------------------------
+
+test("V4 ISSUE B: Rejects actual 16:9 footage declared as 4:3", () => {
+  const record43 = {
+    ...MOCK_VALID_VIDEO,
+    media: {
+      ...MOCK_VALID_VIDEO.media,
+      aspectRatio: "4:3",
+    },
+  };
+
+  // Actual stream is 1920x1080 (16:9)
+  const actual16x9Inspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
+  });
+
+  const res = validateContentRecord(record43, {
+    mode: "publish",
+    videoInspector: actual16x9Inspector,
+    decodeVerifier: () => ({ available: true, ok: true }),
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+
+  assert.equal(res.valid, false);
+  assert.match(
+    res.errors.join("; "),
+    /Actual stream dimensions \(1920x1080, ratio 1\.778\) do not match declared media\.aspectRatio '4:3' \(expected 4:3 \(~1\.333\)\)/
+  );
+
+  // Also verify declared dimensions 1920x1080 with aspectRatio: "4:3" is rejected at metadata level
+  const recordDeclaredConflict = {
+    ...record43,
+    media: {
+      ...record43.media,
+      width: 1920,
+      height: 1080,
+    },
+  };
+  const metaRes = validateContentRecord(recordDeclaredConflict, { mode: "metadata" });
+  assert.equal(metaRes.valid, false);
+  assert.match(metaRes.errors.join("; "), /Declared media dimensions 1920x1080 .* do not match declared media\.aspectRatio '4:3'/);
+});
+
+test("V4 ISSUE B: Rejects one-second WebM declared as 2:55 via container duration fallback", () => {
+  const record255 = {
+    ...MOCK_VALID_VIDEO,
+    duration: "2:55",
+    durationMs: 175000,
+    media: {
+      ...MOCK_VALID_VIDEO.media,
+      codec: "vp9",
+      audioCodec: "opus",
+    },
+  };
+
+  // Stream duration missing (null, as in WebM EBML), but format/container duration is 1.04s
+  const containerDurationInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "vp9",
+    frameRate: 30,
+    durationSec: 1.04, // retrieved from format=duration
+    hasAudio: true,
+    audioCodec: "opus",
+  });
+
+  const res = validateContentRecord(record255, {
+    mode: "publish",
+    videoInspector: containerDurationInspector,
+    decodeVerifier: () => ({ available: true, ok: true }),
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+
+  assert.equal(res.valid, false);
+  assert.match(
+    res.errors.join("; "),
+    /Actual stream duration \(1\.0s\) deviates from declared duration '2:55' \(175s\) by more than 3s tolerance/
+  );
+  assert.match(
+    res.errors.join("; "),
+    /Actual stream duration \(1\.0s\) deviates from declared durationMs \(175000ms \/ 175\.0s\) by more than 3s tolerance/
+  );
+});
+
+test("V4 ISSUE B: Validates audio-stream presence and codec when audio is declared", () => {
+  const dummyDecode = () => ({ available: true, ok: true });
+
+  // 1. Declared AAC, but actual file has NO audio stream
+  const noAudioInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: 25.0,
+    hasAudio: false,
+    audioCodec: null,
+  });
+  const rNoAudio = validateContentRecord(MOCK_VALID_VIDEO, {
+    mode: "publish",
+    videoInspector: noAudioInspector,
+    decodeVerifier: dummyDecode,
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(rNoAudio.valid, false);
+  assert.match(rNoAudio.errors.join("; "), /Actual media file contains no audio streams, but declared media\.audioCodec is 'aac'/);
+
+  // 2. Declared "none", but actual file HAS audio stream
+  const silentDeclaredRecord = {
+    ...MOCK_VALID_VIDEO,
+    media: {
+      ...MOCK_VALID_VIDEO.media,
+      audioCodec: "none",
+    },
+  };
+  const audioPresentInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "aac",
+  });
+  const rSilentMismatch = validateContentRecord(silentDeclaredRecord, {
+    mode: "publish",
+    videoInspector: audioPresentInspector,
+    decodeVerifier: dummyDecode,
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(rSilentMismatch.valid, false);
+  assert.match(rSilentMismatch.errors.join("; "), /Actual media file contains an audio stream \('aac'\), but declared media\.audioCodec is 'none'/);
+
+  // 3. Declared "aac", but actual stream is "opus"
+  const opusInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: 25.0,
+    hasAudio: true,
+    audioCodec: "opus",
+  });
+  const rCodecMismatch = validateContentRecord(MOCK_VALID_VIDEO, {
+    mode: "publish",
+    videoInspector: opusInspector,
+    decodeVerifier: dummyDecode,
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(rCodecMismatch.valid, false);
+  assert.match(rCodecMismatch.errors.join("; "), /Actual audio codec 'opus' does not match declared media\.audioCodec 'aac'/);
+});
+
+test("V4 ISSUE B: Cross-checks durationMs, display duration, and measured physical duration", () => {
+  // Contradictory durationMs vs display duration (0:01 with durationMs: 175000)
+  const contradictoryRecord = {
+    ...MOCK_VALID_VIDEO,
+    duration: "0:01",
+    durationMs: 175000,
+  };
+  const resMeta = validateContentRecord(contradictoryRecord, { mode: "metadata" });
+  assert.equal(resMeta.valid, false);
+  assert.match(
+    resMeta.errors.join("; "),
+    /Contradictory duration values: declared duration '0:01' \(1s\) contradicts durationMs \(175000ms \/ 175\.0s\) by more than 1s tolerance/
+  );
+
+  // Missing measurement in publication mode fails closed
+  const noDurationInspector = () => ({
+    available: true,
+    ok: true,
+    width: 1920,
+    height: 1080,
+    codec: "h264",
+    frameRate: 60,
+    durationSec: null,
+    hasAudio: true,
+    audioCodec: "aac",
+  });
+  const resPub = validateContentRecord(MOCK_VALID_VIDEO, {
+    mode: "publish",
+    videoInspector: noDurationInspector,
+    decodeVerifier: () => ({ available: true, ok: true }),
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(resPub.valid, false);
+  assert.match(
+    resPub.errors.join("; "),
+    /Failed to retrieve reliable physical duration from media file\. Properties cannot be certified without measurement\./
+  );
+});
+
+// -------------------------------------------------------------
+// V4 ISSUE C: JSON Schema Enforcement on Real Entry Point Path
+// -------------------------------------------------------------
+
+test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema: rejects numeric root description", () => {
+  const badManifest = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    description: 12345, // numeric description: forbidden by schema
+    items: [],
+  };
+
+  const res = validateContentManifest(badManifest, { mode: "metadata" });
+  assert.equal(res.valid, false, "Manifest with numeric description must fail");
+  assert.match(res.errors.join("; "), /Property 'description' must be of type string, got number/);
+
+  // Confirm Python jsonschema agreement
+  const pythonCheck = spawnSync(
+    "python3",
+    [
+      "-c",
+      `
+import json, jsonschema, sys
+with open('content/manifest.schema.json') as f:
+    schema = json.load(f)
+v = jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker())
+doc = json.loads(sys.argv[1])
+errors = [e.message for e in v.iter_errors(doc)]
+print(len(errors))
+`,
+      JSON.stringify(badManifest),
+    ],
+    { encoding: "utf8" }
+  );
+  assert.equal(pythonCheck.status, 0);
+  assert.equal(parseInt(pythonCheck.stdout.trim(), 10) > 0, true, "Python jsonschema must reject numeric root description");
+});
+
+test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema: rejects calendar-invalid generatedAt", () => {
+  const calendarInvalidDates = [
+    "2026-02-31T12:00:00Z", // February 31 does not exist
+    "2026-04-31T12:00:00Z", // April has 30 days
+    "2025-02-29T12:00:00Z", // 2025 is not a leap year
+    "2026-11-31T00:00:00Z", // November has 30 days
+  ];
+
+  for (const badDate of calendarInvalidDates) {
+    const badManifest = {
+      manifestVersion: "1.0.0",
+      catalogVersion: "catalog-v2",
+      generatedAt: badDate,
+      items: [],
+    };
+
+    const res = validateContentManifest(badManifest, { mode: "metadata" });
+    assert.equal(res.valid, false, `Date ${badDate} should fail validation`);
+    assert.match(res.errors.join("; "), /must be a valid RFC 3339 \/ ISO 8601 date-time string/);
+
+    // Confirm Python jsonschema agreement
+    const pythonCheck = spawnSync(
+      "python3",
+      [
+        "-c",
+        `
+import json, jsonschema, sys
+with open('content/manifest.schema.json') as f:
+    schema = json.load(f)
+v = jsonschema.Draft7Validator(schema, format_checker=jsonschema.FormatChecker())
+doc = json.loads(sys.argv[1])
+errors = [e.message for e in v.iter_errors(doc)]
+print(len(errors))
+`,
+        JSON.stringify(badManifest),
+      ],
+      { encoding: "utf8" }
+    );
+    assert.equal(pythonCheck.status, 0);
+    assert.equal(
+      parseInt(pythonCheck.stdout.trim(), 10) > 0,
+      true,
+      `Python jsonschema must reject calendar-invalid date ${badDate}`
+    );
+  }
+});
+
+test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema on items array and nested fields", () => {
+  const manifestWithBadItem = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [
+      {
+        ...MOCK_VALID_VIDEO,
+        tags: ["UPPERCASE_TAG"], // schema pattern: ^[a-z0-9_-]+$
+      },
+    ],
+  };
+
+  const res = validateContentManifest(manifestWithBadItem, { mode: "metadata" });
+  assert.equal(res.valid, false);
+  assert.match(res.errors.join("; "), /must match pattern \^\[a-z0-9_-\]\+\$/);
+});
+

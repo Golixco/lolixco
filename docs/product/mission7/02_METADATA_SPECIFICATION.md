@@ -32,9 +32,12 @@ This format provides:
 | `$schema` | `string` | No | Path to schema definition (enables editor autocomplete). |
 | `manifestVersion` | `string` | Yes | Semantic version of the manifest format (`1.0.0`). |
 | `catalogVersion` | `string` | Yes | Target catalog release identifier (e.g. `catalog-v2`). |
-| `generatedAt` | `string` | No | RFC3339 timestamp of manifest generation. |
-| `description` | `string` | No | Contextual note regarding this content batch. |
+| `generatedAt` | `string` | No | RFC3339 / ISO 8601 date-time string. Strictly validated for calendar day correctness (rejects calendar-invalid dates such as `2026-02-31T12:00:00Z` or `2026-04-31T12:00:00Z`). |
+| `description` | `string` | No | Contextual note regarding this content batch (must be a string; numeric values rejected). |
 | `items` | `array` | Yes | Array of content record definitions. |
+
+> [!IMPORTANT]
+> **Authoritative Schema Entry Point:** `validateContentManifest()` invokes `validateJsonSchema()` at its primary entry point. The JSON Schema Draft-07 rules, runtime results, and CLI commands agree completely across root properties, types, date-time formats, item structures, and forbidden additional properties.
 
 ---
 

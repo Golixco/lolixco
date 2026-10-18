@@ -111,11 +111,30 @@ export const manifestSchema = JSON.parse(readFileSync(schemaPath, "utf-8"));
 export const contentRecordSchema = manifestSchema.definitions.ContentRecord;
 
 /**
- * Validate RFC 3339 / ISO date-time string.
+ * Validate RFC 3339 / ISO date-time string with strict calendar validity (handling month lengths and leap years).
  */
 export function isValidDateTime(val) {
   if (typeof val !== "string") return false;
-  if (!RFC3339_DATE_TIME_REGEX.test(val)) return false;
+  const match = val.match(
+    /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?([Zz]|[+-](?:[0-9]{2}):(?:[0-9]{2}))$/
+  );
+  if (!match) return false;
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+  const hour = parseInt(match[4], 10);
+  const min = parseInt(match[5], 10);
+  const sec = parseInt(match[6], 10);
+
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  if (hour > 23 || min > 59 || sec > 59) return false;
+
+  // Calendar validation for days in month (handling leap years)
+  // Date.UTC(year, month, 0) returns the last day of the given 1-indexed month
+  const maxDays = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (day > maxDays) return false;
+
   const timestamp = Date.parse(val);
   return !isNaN(timestamp);
 }
@@ -262,7 +281,8 @@ export function isFFprobeAvailable() {
 }
 
 /**
- * Inspect actual video streams using ffprobe when available.
+ * Inspect actual video and audio streams using ffprobe when available.
+ * Queries stream metadata and container format information (for container-level duration fallback).
  */
 export function inspectVideoWithFFprobe(filePath) {
   if (!isFFprobeAvailable()) {
@@ -274,12 +294,10 @@ export function inspectVideoWithFFprobe(filePath) {
       [
         "-v",
         "error",
-        "-select_streams",
-        "v:0",
         "-show_entries",
-        "stream=width,height,codec_name,r_frame_rate,duration",
+        "stream=codec_type,codec_name,width,height,r_frame_rate,duration:format=duration",
         "-of",
-        "default=noprint_wrappers=1:nokey=1",
+        "json",
         filePath,
       ],
       { encoding: "utf8" }
@@ -291,12 +309,29 @@ export function inspectVideoWithFFprobe(filePath) {
         error: `Stream inspection failed (code ${res?.status}): ${res?.stderr?.trim() || "undecodable, missing, or corrupted video stream"}`,
       };
     }
-    const lines = res.stdout.trim().split("\n");
-    const codec = lines[0]?.trim() || null;
-    const width = parseInt(lines[1], 10) || null;
-    const height = parseInt(lines[2], 10) || null;
-    const frameRateStr = lines[3]?.trim() || null;
-    const durationSec = parseFloat(lines[4]) || null;
+
+    let data;
+    try {
+      data = JSON.parse(res.stdout);
+    } catch (parseErr) {
+      return {
+        available: true,
+        ok: false,
+        error: `Failed to parse ffprobe json output: ${parseErr.message}`,
+      };
+    }
+
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const videoStream = streams.find((s) => s.codec_type === "video");
+
+    if (!videoStream) {
+      return { available: true, ok: false, error: "No video stream found in media file" };
+    }
+
+    const codec = videoStream.codec_name ? videoStream.codec_name.toLowerCase().trim() : null;
+    const width = parseInt(videoStream.width, 10) || null;
+    const height = parseInt(videoStream.height, 10) || null;
+    const frameRateStr = videoStream.r_frame_rate ? String(videoStream.r_frame_rate).trim() : null;
 
     let frameRate = null;
     if (frameRateStr) {
@@ -314,6 +349,21 @@ export function inspectVideoWithFFprobe(filePath) {
       return { available: true, ok: false, error: "Failed to decode valid stream dimensions from video" };
     }
 
+    // Container format duration fallback when stream duration is missing (e.g. WebM/Matroska)
+    const streamDuration = videoStream.duration ? parseFloat(videoStream.duration) : null;
+    const formatDuration = data.format?.duration ? parseFloat(data.format.duration) : null;
+    const durationSec =
+      streamDuration && !isNaN(streamDuration) && streamDuration > 0
+        ? streamDuration
+        : formatDuration && !isNaN(formatDuration) && formatDuration > 0
+        ? formatDuration
+        : null;
+
+    // Audio stream inspection
+    const audioStream = streams.find((s) => s.codec_type === "audio");
+    const hasAudio = !!audioStream;
+    const audioCodec = audioStream?.codec_name ? audioStream.codec_name.toLowerCase().trim() : null;
+
     return {
       available: true,
       ok: true,
@@ -323,9 +373,80 @@ export function inspectVideoWithFFprobe(filePath) {
       frameRate,
       frameRateStr,
       durationSec,
+      hasAudio,
+      audioCodec,
     };
   } catch (err) {
     return { available: true, ok: false, error: `ffprobe execution failed: ${err.message}` };
+  }
+}
+
+/**
+ * Check if ffmpeg is installed and executable in PATH.
+ */
+export function isFFmpegAvailable() {
+  try {
+    const res = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Perform playback-integrity verification by decoding the full media stream to a null sink.
+ * Detects truncated media, bitstream corruption, and unplayable files.
+ */
+export function verifyVideoDecodeIntegrityWithFFmpeg(filePath) {
+  if (!isFFmpegAvailable()) {
+    return {
+      available: false,
+      ok: false,
+      error: "ffmpeg is not installed in the execution environment",
+    };
+  }
+  try {
+    const res = spawnSync(
+      "ffmpeg",
+      [
+        "-v",
+        "error",
+        "-xerror",
+        "-i",
+        filePath,
+        "-f",
+        "null",
+        "-",
+      ],
+      { encoding: "utf8" }
+    );
+    if (!res || res.status !== 0) {
+      return {
+        available: true,
+        ok: false,
+        error: `FFmpeg decode verification failed (exit code ${res?.status}): ${
+          res?.stderr?.trim() || "stream decode failed or file is truncated/corrupted"
+        }`,
+      };
+    }
+    const stderr = res.stderr ? res.stderr.trim() : "";
+    if (stderr.length > 0 && /error|invalid|corrupt|truncated|end of file/i.test(stderr)) {
+      return {
+        available: true,
+        ok: false,
+        error: `FFmpeg decode verification detected stream errors: ${stderr}`,
+      };
+    }
+    return {
+      available: true,
+      ok: true,
+    };
+  } catch (err) {
+    return {
+      available: true,
+      ok: false,
+      error: `FFmpeg execution failed: ${err.message}`,
+    };
   }
 }
 
@@ -449,6 +570,7 @@ export function validateContentRecord(record, options = {}) {
     mode = "metadata", // "metadata" | "assets" | "publish"
     publicDir = resolve(projectRoot, "public"),
     videoInspector = inspectVideoWithFFprobe,
+    decodeVerifier = verifyVideoDecodeIntegrityWithFFmpeg,
   } = options;
 
   const errors = [];
@@ -665,6 +787,25 @@ export function validateContentRecord(record, options = {}) {
     }
   }
 
+  // Cross-check record.duration vs record.durationMs (tolerance: ±1.0s)
+  if (
+    record.duration &&
+    typeof record.duration === "string" &&
+    DURATION_REGEX.test(record.duration.trim()) &&
+    typeof record.durationMs === "number" &&
+    Number.isInteger(record.durationMs) &&
+    record.durationMs > 0
+  ) {
+    const [minStr, secStr] = record.duration.split(":");
+    const declaredSec = parseInt(minStr, 10) * 60 + parseInt(secStr, 10);
+    const msSec = record.durationMs / 1000;
+    if (Math.abs(declaredSec - msSec) > 1.0) {
+      errors.push(
+        `Contradictory duration values: declared duration '${record.duration}' (${declaredSec}s) contradicts durationMs (${record.durationMs}ms / ${msSec.toFixed(1)}s) by more than 1s tolerance`
+      );
+    }
+  }
+
   // Validate trending boolean
   if (record.trending !== undefined && record.trending !== null) {
     if (typeof record.trending !== "boolean") {
@@ -751,6 +892,32 @@ export function validateContentRecord(record, options = {}) {
         }
       }
 
+      // Cross-check declared aspectRatio against declared width and height
+      if (aspectRatio && typeof width === "number" && typeof height === "number" && width > 0 && height > 0) {
+        const declaredRatio = width / height;
+        let matchesDeclared = false;
+        let expectedRatioStr = "";
+        if (aspectRatio === "16:9") {
+          matchesDeclared = declaredRatio >= 1.70 && declaredRatio <= 1.86;
+          expectedRatioStr = "16:9 (~1.778)";
+        } else if (aspectRatio === "4:3") {
+          matchesDeclared = declaredRatio >= 1.28 && declaredRatio <= 1.39;
+          expectedRatioStr = "4:3 (~1.333)";
+        } else if (aspectRatio === "2.39:1") {
+          matchesDeclared = declaredRatio >= 2.30 && declaredRatio <= 2.48;
+          expectedRatioStr = "2.39:1 (~2.390)";
+        } else if (aspectRatio === "9:16") {
+          const vRatio = height / width;
+          matchesDeclared = vRatio >= 1.70 && vRatio <= 1.86;
+          expectedRatioStr = "9:16 (~0.562)";
+        }
+        if (!matchesDeclared) {
+          errors.push(
+            `Declared media dimensions ${width}x${height} (ratio ${declaredRatio.toFixed(3)}) do not match declared media.aspectRatio '${aspectRatio}' (expected ${expectedRatioStr})`
+          );
+        }
+      }
+
       // Aspect ratio consistency
       if (format === "video") {
         if (aspectRatio === "9:16") {
@@ -801,6 +968,7 @@ export function validateContentRecord(record, options = {}) {
   }
 
   let inspectedStreamResult = null;
+  let verifiedDecodeResult = null;
 
   if (record.source !== undefined && record.source !== null) {
     if (typeof record.source !== "string" || !record.source.trim()) {
@@ -847,8 +1015,8 @@ export function validateContentRecord(record, options = {}) {
                 );
               }
             } else {
-              // Successful stream inspection: validate actual dimensions, aspect ratio, codec, duration, frame rate
-              const { width, height, codec, durationSec, frameRate } = inspectedStreamResult;
+              // Successful stream inspection: validate actual dimensions, aspect ratio, codec, audio presence/codec, duration, frame rate
+              const { width, height, codec, durationSec, frameRate, hasAudio, audioCodec } = inspectedStreamResult;
 
               // Validate dimensions against declared media metadata if declared
               if (record.media?.width && width && record.media.width !== width) {
@@ -862,7 +1030,34 @@ export function validateContentRecord(record, options = {}) {
                 );
               }
 
-              // Validate genuine aspect ratio
+              // Validate declared media.aspectRatio against actual stream dimensions
+              if (record.media?.aspectRatio && width && height) {
+                const streamRatio = width / height;
+                const declaredAR = record.media.aspectRatio;
+                let matchesAR = false;
+                let expectedStr = "";
+                if (declaredAR === "16:9") {
+                  matchesAR = streamRatio >= 1.70 && streamRatio <= 1.86;
+                  expectedStr = "16:9 (~1.778)";
+                } else if (declaredAR === "4:3") {
+                  matchesAR = streamRatio >= 1.28 && streamRatio <= 1.39;
+                  expectedStr = "4:3 (~1.333)";
+                } else if (declaredAR === "2.39:1") {
+                  matchesAR = streamRatio >= 2.30 && streamRatio <= 2.48;
+                  expectedStr = "2.39:1 (~2.390)";
+                } else if (declaredAR === "9:16") {
+                  const verticalRatio = height / width;
+                  matchesAR = verticalRatio >= 1.70 && verticalRatio <= 1.86;
+                  expectedStr = "9:16 (~0.562)";
+                }
+                if (!matchesAR) {
+                  errors.push(
+                    `Actual stream dimensions (${width}x${height}, ratio ${streamRatio.toFixed(3)}) do not match declared media.aspectRatio '${declaredAR}' (expected ${expectedStr})`
+                  );
+                }
+              }
+
+              // Validate genuine format aspect ratio
               if (format === "video") {
                 if (height > width) {
                   errors.push(
@@ -870,10 +1065,9 @@ export function validateContentRecord(record, options = {}) {
                   );
                 } else {
                   const ratio = width / height;
-                  // Genuine landscape: expected 16:9 (~1.777), allow widescreen within tolerance
-                  if (ratio < 1.30 || ratio > 2.50) {
+                  if (ratio < 1.28 || ratio > 2.50) {
                     errors.push(
-                      `Actual video aspect ratio (${width}x${height}, ratio ${ratio.toFixed(3)}) is not a genuine landscape format (expected 16:9 ratio ~1.777)`
+                      `Actual video aspect ratio (${width}x${height}, ratio ${ratio.toFixed(3)}) is not a genuine landscape format (expected 16:9 ratio ~1.777 or 4:3 ~1.333)`
                     );
                   }
                 }
@@ -904,6 +1098,31 @@ export function validateContentRecord(record, options = {}) {
                 }
               }
 
+              // Validate audio stream presence and codec when declared
+              if (record.media?.audioCodec) {
+                const declaredAudio = normalizeCodec(record.media.audioCodec);
+                if (declaredAudio === "none") {
+                  if (hasAudio) {
+                    errors.push(
+                      `Actual media file contains an audio stream ('${audioCodec || "audio"}'), but declared media.audioCodec is 'none'`
+                    );
+                  }
+                } else {
+                  if (!hasAudio) {
+                    errors.push(
+                      `Actual media file contains no audio streams, but declared media.audioCodec is '${record.media.audioCodec}'`
+                    );
+                  } else if (audioCodec) {
+                    const normalizedStreamAudio = normalizeCodec(audioCodec);
+                    if (normalizedStreamAudio !== declaredAudio) {
+                      errors.push(
+                        `Actual audio codec '${audioCodec}' does not match declared media.audioCodec '${record.media.audioCodec}'`
+                      );
+                    }
+                  }
+                }
+              }
+
               // Validate frame rate if declared in media metadata (documented tolerance: ±0.5 fps)
               if (record.media?.frameRate && typeof frameRate === "number") {
                 if (Math.abs(frameRate - record.media.frameRate) > 0.5) {
@@ -913,15 +1132,56 @@ export function validateContentRecord(record, options = {}) {
                 }
               }
 
-              // Validate duration if inspected (tolerance: ±3 seconds)
-              if (typeof durationSec === "number" && record.duration) {
-                const [minStr, secStr] = record.duration.split(":");
-                const declaredSec = parseInt(minStr, 10) * 60 + parseInt(secStr, 10);
-                if (Math.abs(durationSec - declaredSec) > 3.0) {
-                  errors.push(
-                    `Actual stream duration (${durationSec.toFixed(1)}s) deviates from declared duration '${record.duration}' (${declaredSec}s) by more than 3s tolerance`
-                  );
+              // Cross-check physical duration (measured duration)
+              if (typeof durationSec === "number" && durationSec > 0) {
+                if (record.duration) {
+                  const [minStr, secStr] = record.duration.split(":");
+                  const declaredSec = parseInt(minStr, 10) * 60 + parseInt(secStr, 10);
+                  if (Math.abs(durationSec - declaredSec) > 3.0) {
+                    errors.push(
+                      `Actual stream duration (${durationSec.toFixed(1)}s) deviates from declared duration '${record.duration}' (${declaredSec}s) by more than 3s tolerance`
+                    );
+                  }
                 }
+                if (typeof record.durationMs === "number" && record.durationMs > 0) {
+                  const msSec = record.durationMs / 1000;
+                  if (Math.abs(durationSec - msSec) > 3.0) {
+                    errors.push(
+                      `Actual stream duration (${durationSec.toFixed(1)}s) deviates from declared durationMs (${record.durationMs}ms / ${msSec.toFixed(1)}s) by more than 3s tolerance`
+                    );
+                  }
+                }
+              } else if (mode === "publish") {
+                errors.push(
+                  `Publication readiness failed (${record.source}): Failed to retrieve reliable physical duration from media file. Properties cannot be certified without measurement.`
+                );
+              }
+            }
+          }
+
+          // Full decode playback-integrity verification with ffmpeg (or injected decode verifier)
+          if (decodeVerifier) {
+            verifiedDecodeResult = decodeVerifier(realTarget);
+
+            if (!verifiedDecodeResult.available) {
+              if (mode === "publish") {
+                errors.push(
+                  `Publication readiness requirement failed (${record.source}): ffmpeg is required for playback decode integrity verification before publication.`
+                );
+              } else {
+                warnings.push(
+                  `Playback decode integrity verification incomplete (${record.source}): ffmpeg unavailable in environment.`
+                );
+              }
+            } else if (!verifiedDecodeResult.ok) {
+              if (mode === "publish") {
+                errors.push(
+                  `Source video playback decode integrity verification failed (${record.source}): ${verifiedDecodeResult.error}`
+                );
+              } else {
+                warnings.push(
+                  `Source video playback decode warning (${record.source}): ${verifiedDecodeResult.error}`
+                );
               }
             }
           }
@@ -1012,6 +1272,7 @@ export function validateContentRecord(record, options = {}) {
     errors,
     warnings,
     inspectedStream: inspectedStreamResult,
+    verifiedDecode: verifiedDecodeResult,
   };
 }
 
@@ -1049,29 +1310,50 @@ export function validateContentManifest(manifest, options = {}) {
     };
   }
 
+  // 1. Authoritative Draft-07 JSON Schema Validation
+  const schemaErrors = validateJsonSchema(manifest, manifestSchema, manifestSchema, "");
+  for (const sErr of schemaErrors) {
+    if (!errors.includes(sErr)) {
+      errors.push(`Manifest schema error: ${sErr}`);
+    }
+  }
+
   // Check unexpected root keys
   for (const rKey of Object.keys(manifest)) {
     if (!ALLOWED_ROOT_KEYS.includes(rKey)) {
-      errors.push(`Unexpected root property '${rKey}' (schema forbids additionalProperties)`);
+      const errStr = `Unexpected root property '${rKey}' (schema forbids additionalProperties)`;
+      if (!errors.includes(errStr)) {
+        errors.push(errStr);
+      }
     }
   }
 
   if (manifest.generatedAt !== undefined) {
     if (!isValidDateTime(manifest.generatedAt)) {
-      errors.push(
-        `Manifest 'generatedAt' must be a valid RFC 3339 / ISO 8601 date-time string (e.g. '2026-10-18T12:00:00Z'), got '${manifest.generatedAt}'`
-      );
+      const errStr = `Manifest 'generatedAt' must be a valid RFC 3339 / ISO 8601 date-time string (e.g. '2026-10-18T12:00:00Z'), got '${manifest.generatedAt}'`;
+      if (!errors.includes(errStr)) {
+        errors.push(errStr);
+      }
     }
   }
 
   if (typeof manifest.manifestVersion !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(manifest.manifestVersion)) {
-    errors.push("Manifest missing valid 'manifestVersion' semantic version string (e.g. '1.0.0')");
+    const errStr = "Manifest missing valid 'manifestVersion' semantic version string (e.g. '1.0.0')";
+    if (!errors.includes(errStr)) {
+      errors.push(errStr);
+    }
   }
   if (typeof manifest.catalogVersion !== "string" || !/^[a-zA-Z0-9_-]+$/.test(manifest.catalogVersion)) {
-    errors.push("Manifest missing valid 'catalogVersion' string (e.g. 'catalog-v2')");
+    const errStr = "Manifest missing valid 'catalogVersion' string (e.g. 'catalog-v2')";
+    if (!errors.includes(errStr)) {
+      errors.push(errStr);
+    }
   }
   if (!Array.isArray(manifest.items)) {
-    errors.push("Manifest missing 'items' array");
+    const errStr = "Manifest missing 'items' array";
+    if (!errors.includes(errStr)) {
+      errors.push(errStr);
+    }
     return {
       valid: false,
       errors,
@@ -1089,6 +1371,10 @@ export function validateContentManifest(manifest, options = {}) {
   let shortCount = 0;
   let inspectedStreamCount = 0;
   let streamErrors = 0;
+  let unavailableStreams = 0;
+  let decodedStreamCount = 0;
+  let decodeErrors = 0;
+  let unavailableDecoders = 0;
 
   for (let idx = 0; idx < manifest.items.length; idx++) {
     const item = manifest.items[idx];
@@ -1110,8 +1396,20 @@ export function validateContentManifest(manifest, options = {}) {
     if (itemResult.inspectedStream) {
       if (itemResult.inspectedStream.ok) {
         inspectedStreamCount++;
+      } else if (!itemResult.inspectedStream.available) {
+        unavailableStreams++;
       } else {
         streamErrors++;
+      }
+    }
+
+    if (itemResult.verifiedDecode) {
+      if (itemResult.verifiedDecode.ok) {
+        decodedStreamCount++;
+      } else if (!itemResult.verifiedDecode.available) {
+        unavailableDecoders++;
+      } else {
+        decodeErrors++;
       }
     }
 
@@ -1123,31 +1421,57 @@ export function validateContentManifest(manifest, options = {}) {
     }
   }
 
-  // Accurate stream inspection reporting
+  // Accurate stream inspection and decode verification reporting
   let streamInspection = "SKIPPED (Metadata preparation mode)";
+  let decodeVerification = "SKIPPED (Metadata preparation mode)";
+
   if (mode === "publish") {
-    if (!isFFprobeAvailable() && !options.videoInspector) {
-      streamInspection = "FAILED (ffprobe unavailable in environment; publication blocked)";
-      errors.push(
-        "Publication requirement failed: ffprobe is not installed in the environment. Physical stream verification is mandatory for publication readiness."
-      );
+    if ((!isFFprobeAvailable() && !options.videoInspector) || unavailableStreams > 0) {
+      streamInspection = "INCOMPLETE (ffprobe unavailable in environment; publication blocked)";
+      if (!errors.some((e) => e.includes("ffprobe is not installed"))) {
+        errors.push(
+          "Publication requirement failed: ffprobe is not installed in the environment. Physical stream verification is mandatory for publication readiness."
+        );
+      }
     } else if (streamErrors > 0) {
       streamInspection = `FAILED (${streamErrors} streams undecodable or failed inspection)`;
     } else if (inspectedStreamCount === manifest.items.length && manifest.items.length > 0) {
       streamInspection = `VERIFIED (${inspectedStreamCount} video streams certified)`;
     } else {
       streamInspection = "INCOMPLETE (Streams not fully verified)";
-      if (mode === "publish") {
-        errors.push("Publication readiness requirement failed: All media streams must be verified.");
+      errors.push("Publication readiness requirement failed: All media streams must be verified.");
+    }
+
+    if ((!isFFmpegAvailable() && !options.decodeVerifier) || unavailableDecoders > 0) {
+      decodeVerification = "INCOMPLETE (ffmpeg unavailable in environment; publication blocked)";
+      if (!errors.some((e) => e.includes("ffmpeg is not installed"))) {
+        errors.push(
+          "Publication requirement failed: ffmpeg is not installed in the environment. Full decode playback-integrity verification is mandatory for publication readiness."
+        );
       }
+    } else if (decodeErrors > 0) {
+      decodeVerification = `FAILED (${decodeErrors} streams failed playback decode integrity verification)`;
+    } else if (decodedStreamCount === manifest.items.length && manifest.items.length > 0) {
+      decodeVerification = `VERIFIED (${decodedStreamCount} video streams decoded and playback-certified)`;
+    } else {
+      decodeVerification = "INCOMPLETE (Streams not fully verified for playback decode integrity)";
+      errors.push("Publication readiness requirement failed: All media streams must pass playback decode verification.");
     }
   } else if (mode === "assets") {
     if (inspectedStreamCount > 0) {
       streamInspection = `VERIFIED (${inspectedStreamCount} streams inspected)`;
-    } else if (!isFFprobeAvailable()) {
+    } else if (!isFFprobeAvailable() || unavailableStreams > 0) {
       streamInspection = "INCOMPLETE (ffprobe unavailable; technical stream inspection incomplete)";
     } else {
       streamInspection = "INCOMPLETE (no video streams inspected)";
+    }
+
+    if (decodedStreamCount > 0) {
+      decodeVerification = `VERIFIED (${decodedStreamCount} streams decoded)`;
+    } else if (!isFFmpegAvailable() || unavailableDecoders > 0) {
+      decodeVerification = "INCOMPLETE (ffmpeg unavailable; playback integrity verification incomplete)";
+    } else {
+      decodeVerification = "INCOMPLETE (no video streams decoded)";
     }
   }
 
@@ -1165,6 +1489,7 @@ export function validateContentManifest(manifest, options = {}) {
     mode,
     assetVerification,
     streamInspection,
+    decodeVerification,
     summary: {
       total: manifest.items.length,
       videos: videoCount,
@@ -1374,6 +1699,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.log(`- Mode: ${result.mode}`);
       console.log(`- Asset verification: ${result.assetVerification}`);
       console.log(`- Stream inspection: ${result.streamInspection}`);
+      console.log(`- Decode verification: ${result.decodeVerification}`);
       console.log(
         `- Total items: ${result.summary.total} (${result.summary.videos} videos, ${result.summary.shorts} shorts)`
       );
