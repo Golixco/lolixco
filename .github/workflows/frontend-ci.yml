@@ -55,6 +55,9 @@ jobs:
       - name: Run local media asset checks
         run: pnpm check:assets
 
+      - name: Run content catalog validation
+        run: pnpm check:content
+
       - name: Run production build
         run: pnpm build
 

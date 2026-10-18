@@ -6,8 +6,9 @@ The content intake process uses a declarative **Owner Content Manifest** format 
 
 This format provides:
 1. **Clean separation of concerns:** Public client metadata is decoupled from private curation, rights review, and technical encoding metrics.
-2. **Schema-enforced integrity:** Types, value ranges, string lengths, and aspect ratios are deterministically validated before ingestion.
+2. **Schema-enforced authoritativeness:** Types, value ranges, string lengths, enums, and aspect ratios are deterministically validated with strict `additionalProperties: false` enforcement across root, records, media, and editorial blocks.
 3. **Owner-editable JSON workflow:** Editors work with structured JSON documents rather than modifying TypeScript application code directly.
+4. **Enforced ID ranges:** 100–199 for landscape videos; 200–299 for portrait Shorts; 0–16 reserved for demo edits; 17–99 reserved for internal test harnesses.
 
 ---
 
@@ -47,13 +48,13 @@ These fields are projected to client bundles and visible to platform visitors:
 
 | Field | Type | Format / Constraints | Description |
 | :--- | :--- | :--- | :--- |
-| `id` | `integer` | `>= 0`, unique | Numeric ID. `0-16` are reserved for demo items. Recommended: `100-199` for landscape videos, `200-299` for portrait shorts. |
-| `format` | `string` | `"video"` \| `"short"` | Presentation format. Standard landscape (`16:9`) or vertical Short (`9:16`). |
+| `id` | `integer` | `>= 0`, unique | Numeric ID. `0-16` are reserved for demo items. Required: `100-199` for landscape videos, `200-299` for portrait shorts. |
+| `format` | `string` | `"video"` \| `"short"` | Mandatory presentation format. Standard landscape (`16:9`) or vertical Short (`9:16`). |
 | `title` | `string` | `3` to `100` chars | Display title. |
 | `description` | `string` | `5` to `1000` chars | Descriptive summary shown on video player and Shorts viewer. |
 | `category` | `string` | Enum: `Anime`, `Gaming`, `Movies`, `Series`, `Phonk`, `Multifandom`, `Cinematic` | Primary category. `Cinematic` is strictly prohibited for new content (`id >= 17`). |
 | `fandomIds` | `string[]` | Registered slug IDs | Optional array of fandom slugs registered in `FANDOM_REGISTRY`. Must be compatible with `category` unless `Multifandom`. |
-| `tags` | `string[]` | `^[a-z0-9_-]+$` | Array of search tags (lowercase, no leading `#`). At least 1 required. |
+| `tags` | `string[]` | `^[a-z0-9_-]+$` | Array of lowercase search tags (strictly lowercase, no leading `#`). At least 1 required. |
 | `poster` | `string` | Valid image file path | URL or local path (`/media/...`) to card poster image (`.svg`, `.png`, `.jpg`, `.webp`). |
 | `source` | `string` | Valid video file path | URL or local path (`/media/...`) to video file (`.mp4`, `.webm`, `.m4v`). |
 | `duration` | `string` | `^[0-9]+:[0-5][0-9]$` | Human-readable duration (e.g. `"0:24"`, `"1:45"`). |
@@ -64,7 +65,7 @@ These fields are projected to client bundles and visible to platform visitors:
 
 ### 3.2 Technical Media Metadata (`media`)
 
-Optional technical specifications used for media validation and player performance tuning:
+Optional technical specifications used for media validation and player performance tuning (`additionalProperties: false`):
 
 | Field | Type | Values | Description |
 | :--- | :--- | :--- | :--- |
@@ -86,37 +87,49 @@ Optional technical specifications used for media validation and player performan
 | Field | Type | Values | Description |
 | :--- | :--- | :--- | :--- |
 | `reviewStatus` | `string` | `"draft"` \| `"reviewed"` \| `"approved"` \| `"rejected"` \| `"published"` | Workflow review stage. Items cannot be published without `approved` or `published` status. |
-| `rightsCleared` | `boolean` | `true` \| `false` | Confirms copyright clearance, digital release, or license verification. |
+| `rightsCleared` | `boolean` | `true` \| `false` | Confirms copyright clearance, digital release, or license verification. Mandatory `true` for publication. |
 | `sourceAttribution` | `string` | Up to `500` chars | Internal record of creator identity, original platform link, or license terms. **Never exposed to public users.** |
 | `curatorNotes` | `string` | Up to `1000` chars | Internal notes regarding pacing, cut rhythm, audio quality, or feature placement. |
 | `ownerAssetRef` | `string` | Up to `100` chars | Owner batch inventory identifier (e.g. `BATCH01_LANDSCAPE_01`). |
 
 ---
 
-## 4. Public Client Projection
+## 4. Safe Public Client Projection
 
 When compiling or generating the live catalog [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts), the validation utility function [`projectToPublicEdit`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs) projects the manifest record into the clean public `Edit` model:
 
 ```typescript
-export function projectToPublicEdit(item: ContentRecord): Edit {
+export function projectToPublicEdit(item: ContentRecord, { strict = false } = {}): Edit {
+  if (strict) {
+    const reviewStatus = item.editorial?.reviewStatus;
+    const rightsCleared = item.editorial?.rightsCleared;
+    if (reviewStatus !== "approved" && reviewStatus !== "published") {
+      throw new Error(`Cannot project item ${item.id} to public catalog: editorial reviewStatus must be 'approved' or 'published', got '${reviewStatus}'`);
+    }
+    if (rightsCleared !== true) {
+      throw new Error(`Cannot project item ${item.id} to public catalog: editorial rightsCleared must be true`);
+    }
+  }
+
   return {
     id: item.id,
     title: item.title,
     category: item.category,
-    tags: item.tags,
+    tags: Array.isArray(item.tags) ? [...item.tags] : [],
     description: item.description,
     creator: "Lolixco curated", // Uniform public display name
     poster: item.poster,
     source: item.source,
     duration: item.duration,
-    trending: item.trending ?? false,
+    trending: !!item.trending,
     format: item.format,
-    ...(item.fandomIds?.length ? { fandomIds: item.fandomIds } : {}),
+    ...(item.fandomIds?.length ? { fandomIds: [...item.fandomIds] } : {}),
   };
 }
 ```
 
 This guarantees:
-1. Zero leakage of private review statuses, rights notes, or internal curator remarks.
-2. Complete exclusion of creator personal details from public search indexes and cards.
-3. Full backward compatibility with the existing TypeScript `Edit` interface and feed compositor.
+1. **Compilation Guard:** Unapproved or uncleared records cannot be compiled into production bundles when `strict: true`.
+2. **Zero Leakage:** Private review statuses, rights notes, and internal curator remarks are stripped.
+3. **Anonymized Attribution:** Creator personal details are completely excluded from public search indexes and cards.
+4. **Backward Compatibility:** Full alignment with the existing TypeScript `Edit` interface and feed compositor.

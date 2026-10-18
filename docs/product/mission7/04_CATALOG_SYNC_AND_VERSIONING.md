@@ -17,7 +17,9 @@ Lolixco's content catalog transitions through clear, deterministic version gates
 ┌─────────────────────────────────┐
 │     Ingestion Foundation        │
 │  - Owner Manifest Schema        │
-│  - Staged Content Validator     │
+│  - Strict ID Allocation Policy  │
+│  - 3-Tier Validation Workflows  │
+│  - Private Manifest Protection  │
 │  - Production Invariants Locked │
 └────────────────┬────────────────┘
                  │
@@ -34,86 +36,57 @@ Lolixco's content catalog transitions through clear, deterministic version gates
 
 ---
 
-## 2. Decoupled Ingestion Workflow
+## 2. Decoupled Ingestion Workflow & Modes
 
-To protect production stability and prevent corrupted metadata or partial uploads from breaking live users, content ingestion follows a decoupled, three-tier progression:
+To protect production stability and prevent corrupted metadata or partial uploads from breaking live users, content ingestion follows a decoupled progression:
 
 ```
-[Owner Staging]                [Validation Gate]              [Production Publication]
-Raw Video Files (.mp4)     ──► `scripts/validate-content.mjs` ──► `src/data/edits.ts`
-Poster Images (.webp)      ──► Schema & Magic Bytes Check     ──► `export_catalog.py`
-`content/manifest.json`    ──► Aspect Ratio & Taxonomy Check  ──► `catalog_snapshot.json`
+[Metadata Preparation Mode]    ──► Validates manifest schema, IDs, taxonomy (files not needed)
+[Asset Verification Mode]      ──► Validates staged files, magic bytes, safe path containment
+[Publication Readiness Mode]   ──► Validates approval, rights clearance, assets, and streams
 ```
 
-1. **Tier 1 — Owner Manifest Staging:**
-   Editors author or edit `content/manifest.json` referencing assets staged in `public/media/`. No application source code is touched at this stage.
-2. **Tier 2 — Deterministic Validation Gate:**
-   Run `npm run check:content -- --manifest content/manifest.json`.
-   If any duplicate ID, missing file, corrupted header, invalid taxonomy, or aspect ratio mismatch occurs, the pipeline halts immediately.
-3. **Tier 3 — Controlled Production Compilation:**
-   Once validated, records are projected into [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts), the Python catalog snapshot is updated via `python3 server/recsys/export_catalog.py`, and the entire verification suite is run.
+1. **Tier 1 — Metadata Preparation Mode (`--mode metadata`):**
+   Editors author `content/manifest.json` before media files arrive. Validates schema, data types, string constraints, and ID range compliance. Asset verification is marked as `SKIPPED`.
+2. **Tier 2 — Asset Verification Mode (`--mode assets`):**
+   Requires staged media files to exist in `public/media/`. Checks magic bytes via streaming header reads (max 64KB) and verifies safe path containment.
+3. **Tier 3 — Publication Readiness Mode (`--mode publish`):**
+   Requires approved review (`reviewStatus: "approved" | "published"`), documented rights clearance (`rightsCleared: true`), and verified assets.
+4. **Tier 4 — Controlled Production Compilation:**
+   Once publication-ready, records are projected into [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts) via `projectToPublicEdit({ strict: true })`.
 
 ---
 
-## 3. Python Recommendation System Migration Plan
+## 3. Private Manifest Protection (`.gitignore`)
 
-The Python recommendation service in `server/recsys/` enforces strict snapshot drift checks:
-
-### 3.1 Mission 7A State (Unchanged Baseline)
-- `server/recsys/export_catalog.py` enforces:
-  ```python
-  ALLOWED_RECORD_FIELDS = {
-      "id", "title", "category", "tags", "description",
-      "creator", "poster", "source", "duration", "trending"
-  }
-  ```
-- `catalog_snapshot.json` has `catalog_version: "demo-catalog-v1"` and `total_edits: 17`.
-- **Mission 7A Invariant:** No modifications are made to `server/recsys/catalog_snapshot.json` or `export_catalog.py` in Mission 7A. The baseline contract remains 100% frozen.
-
-### 3.2 Mission 7B Migration Plan (When Real Media is Provided)
-When the owner delivers the first content batch, the recommendation engine catalog contract will be upgraded to `catalog-v2` in a single atomic commit:
-
-1. **Update `ALLOWED_RECORD_FIELDS` in `server/recsys/export_catalog.py`:**
-   Add `"format"` and `"fandomIds"` to allowed fields:
-   ```python
-   ALLOWED_RECORD_FIELDS = {
-       "id", "title", "category", "tags", "description",
-       "creator", "poster", "source", "duration", "trending",
-       "format", "fandomIds"
-   }
-   ```
-2. **Update `CANONICAL_CATEGORIES` in `server/recsys/types.py`:**
-   Include `"Multifandom"`:
-   ```python
-   CANONICAL_CATEGORIES: tuple[str, ...] = (
-       "Cinematic", "Gaming", "Anime", "Movies", "Series", "Phonk", "Multifandom"
-   )
-   ```
-3. **Regenerate Snapshot:**
-   Run `python3 server/recsys/export_catalog.py` to write the new `catalog_snapshot.json` with `catalog_version: "catalog-v2"`.
-4. **Format-Aware Up Next Recommendation Guard:**
-   Ensure `server/recsys/engine.py` restricts Up Next recommendations to matching formats (long-form videos recommend long-form videos; Shorts recommend Shorts).
+Working manifests contain private editorial provenance, rights records, and curator notes. To prevent accidental leakage to the public GitHub repository:
+- `content/manifest.json` is added to `.gitignore`.
+- `content/*.private.json` and `content/staging/` are added to `.gitignore`.
+- Only the hypothetical schema template [`content/manifest.template.json`](file:///home/vuld0/Lolixco/content/manifest.template.json) and [`content/manifest.schema.json`](file:///home/vuld0/Lolixco/content/manifest.schema.json) are committed to version control.
+- Sanitized public catalogs in `src/data/edits.ts` contain strictly public projection fields.
 
 ---
 
 ## 4. ID Allocation Policy
 
-To prevent ID collisions and simplify debugging across logs, metrics, and URLs:
+Enforced deterministically by [`scripts/validate-content.mjs`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs):
 
-| Range | Content Classification | Current Count | Target Count |
-| :--- | :--- | :--- | :--- |
-| `0` – `16` | Reserved baseline demo edits (Cinematic & multi-category) | 17 | 17 (frozen) |
-| `17` – `99` | Reserved for internal test fixtures and staging harnesses | 0 | 0 in prod |
-| `100` – `199` | Curated landscape videos (`format: "video"`) | 0 | ~50 |
-| `200` – `299` | Curated portrait Shorts (`format: "short"`) | 0 | ~20 |
-| `300+` | Future expansion batches | 0 | TBD |
+| Range | Content Classification | Current Count | Target Count | Enforcement Rule |
+| :--- | :--- | :--- | :--- | :--- |
+| `0` – `16` | Reserved baseline demo edits | 17 | 17 (frozen) | Rejected for new content batches. |
+| `17` – `99` | Reserved for internal test harnesses | 0 | 0 in prod | Rejected for new content batches. |
+| `100` – `199` | Curated landscape videos (`format: "video"`) | 0 | ~50 | Mandatory for landscape videos. |
+| `200` – `299` | Curated portrait Shorts (`format: "short"`) | 0 | ~20 | Mandatory for vertical Shorts. |
+| `300+` | Future expansion batches | 0 | TBD | Reserved for subsequent content drops. |
 
 ---
 
-## 5. Catalog Rollback Protocol
+## 5. Python Recommendation System Migration Plan (Mission 7B)
 
-If an ingested content batch introduces an asset defect or licensing issue post-deployment:
-1. Revert `src/data/edits.ts` to the prior release state.
-2. Run `python3 server/recsys/export_catalog.py` to re-synchronize the snapshot.
-3. Execute `npm test` and `python3 server/recsys/export_catalog.py --check`.
-4. Because catalog compilation is 100% deterministic and reproducible, rollbacks require zero database migrations or cache invalidation scripts.
+The Python recommendation service in `server/recsys/` enforces strict snapshot drift checks:
+- **Mission 7A Baseline:** `server/recsys/catalog_snapshot.json` and `export_catalog.py` remain completely untouched in Mission 7A.
+- **Mission 7B Migration Plan:**
+  1. Add `"format"` and `"fandomIds"` to `ALLOWED_RECORD_FIELDS` in `server/recsys/export_catalog.py`.
+  2. Add `"Multifandom"` to `CANONICAL_CATEGORIES` in `server/recsys/types.py`.
+  3. Re-export snapshot using `python3 server/recsys/export_catalog.py` to write `catalog_version: "catalog-v2"`.
+  4. Run `python3 server/recsys/export_catalog.py --check` and Python recsys test suite to confirm 0 drift.

@@ -8,7 +8,7 @@ This document outlines:
 1. Video encoding standards for landscape videos (`16:9`) and vertical Shorts (`9:16`).
 2. Audio standards (loudness normalization, sample rate, peak control).
 3. Poster artwork guidelines.
-4. Deterministic asset validation procedures (magic byte checks and ffprobe verification recipes).
+4. Deterministic asset validation procedures (streaming magic byte checks, containment rules, and ffprobe inspection recipes).
 
 ---
 
@@ -84,9 +84,10 @@ When owner media assets are staged, they are subject to automated verification a
 
 ### 5.1 Local Deterministic Validation (`scripts/validate-content.mjs`)
 Implemented in Node.js with zero external dependencies:
-- **File Existence:** File must exist at the referenced path in `public/media/`.
-- **Non-Zero Size:** Files with 0 bytes are rejected.
-- **Header & Magic Bytes Verification:**
+- **Streaming Header Inspection:** Rather than reading multi-megabyte video files into memory, the validator opens the file descriptor and reads only the initial header bytes (up to 64KB) to verify signatures.
+- **Safe Directory Containment:** All local paths starting with `/media/` or `/brand/` are strictly resolved relative to `public/`. Any path traversal (`../`) resolving outside these boundaries is immediately rejected.
+- **External URL Policy:** External URLs (`http://`, `https://`) are permitted during metadata preparation with a notice, but are strictly prohibited for production publication readiness (staged local assets are required).
+- **Header & Magic Bytes Signatures:**
   - `.svg`: Root `<svg` element signature.
   - `.png`: Header signature `89504e470d0a1a0a`.
   - `.jpg` / `.jpeg`: SOI marker `ffd8ff`.
@@ -94,35 +95,7 @@ Implemented in Node.js with zero external dependencies:
   - `.webm`: EBML header ID `1a45dfa3`.
   - `.mp4` / `.m4v`: ISO Base Media File Format `ftyp` box at byte offset 4 (`66747970`).
 
-### 5.2 Deep Media Inspection Recipes (FFprobe / FFMpeg)
-When incoming media batches are staged, operators execute the following verification recipes:
-
-#### Check Video Dimensions, Aspect Ratio, and Codec:
-```bash
-ffprobe -v error -select_streams v:0 \
-  -show_entries stream=width,height,codec_name,r_frame_rate,duration \
-  -of default=noprint_wrappers=1:nokey=1 input.mp4
-```
-
-#### Check Integrated Loudness (LUFS / LKFS):
-```bash
-ffmpeg -i input.mp4 -af ebur128=framelog=verbose -f null - 2>&1 | grep "I:"
-```
-
-#### Standard Encoding Recipe for Landscape Videos (`16:9`):
-```bash
-ffmpeg -i raw_input.mov -c:v libx264 -preset slow -crf 19 \
-  -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-  -pix_fmt yuv420p -c:a aac -b:a 192k -ar 48000 \
-  -af "loudnorm=I=-14:LRA=7:tp=-1.0" \
-  -movflags +faststart output_1080p.mp4
-```
-
-#### Standard Encoding Recipe for Vertical Shorts (`9:16`):
-```bash
-ffmpeg -i raw_short.mov -c:v libx264 -preset slow -crf 19 \
-  -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" \
-  -pix_fmt yuv420p -c:a aac -b:a 192k -ar 48000 \
-  -af "loudnorm=I=-14:LRA=7:tp=-1.0" \
-  -movflags +faststart output_short.mp4
-```
+### 5.2 Deep Media Stream Inspection (FFprobe)
+- **Automatic Detection:** The validator checks whether `ffprobe` is installed in PATH.
+- **When FFprobe is available:** The validator executes `ffprobe` to verify that actual video stream dimensions match the declared format (width > height for `video`, height > width for `short`).
+- **When FFprobe is unavailable:** The validator records `streamInspection: "INCOMPLETE (ffprobe unavailable)"`. Publication readiness mode issues an explicit warning noting that physical stream certification remains incomplete until ffprobe is executed.

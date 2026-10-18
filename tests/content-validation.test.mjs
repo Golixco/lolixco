@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,7 +8,7 @@ import {
   validateContentManifest,
   validateLiveCatalog,
   projectToPublicEdit,
-  verifyAssetBytes,
+  verifyAssetBytesStreaming,
 } from "../scripts/validate-content.mjs";
 import { FANDOM_REGISTRY } from "../src/data/fandoms.ts";
 import { edits } from "../src/data/edits.ts";
@@ -32,12 +32,16 @@ const MOCK_VALID_VIDEO = {
     height: 1080,
     codec: "h264",
     audioCodec: "aac",
+    frameRate: 60,
+    bitrateKbps: 8000,
+    loudnessLkfs: -14,
   },
   editorial: {
     reviewStatus: "approved",
     rightsCleared: true,
     sourceAttribution: "Verified synthetic source.",
-    curatorNotes: "Looks great.",
+    curatorNotes: "Approved synthetic record.",
+    ownerAssetRef: "SYNTH_01",
   },
 };
 
@@ -53,261 +57,403 @@ const MOCK_VALID_SHORT = {
   source: "/media/motion-study.webm",
   duration: "0:15",
   durationMs: 15000,
-  trending: true,
+  trending: false,
   media: {
     aspectRatio: "9:16",
     width: 1080,
     height: 1920,
     codec: "h264",
     audioCodec: "aac",
+    frameRate: 60,
+    bitrateKbps: 6000,
+    loudnessLkfs: -14,
   },
   editorial: {
     reviewStatus: "approved",
     rightsCleared: true,
     sourceAttribution: "Verified synthetic submission.",
-    curatorNotes: "High retention short.",
+    curatorNotes: "Approved synthetic short.",
+    ownerAssetRef: "SYNTH_SHORT_01",
   },
 };
 
-test("Live catalog has exactly 17 demo edits, 0 shorts, and valid IDs 0-16", async () => {
+// -------------------------------------------------------------
+// FIX A: Authoritative Schema Validation & Malformed Types
+// -------------------------------------------------------------
+
+test("Schema validation rejects non-object or null records cleanly", () => {
+  const rNull = validateContentRecord(null);
+  assert.equal(rNull.valid, false);
+  assert.match(rNull.errors[0], /must be a JSON object, got null/);
+
+  const rArray = validateContentRecord([]);
+  assert.equal(rArray.valid, false);
+  assert.match(rArray.errors[0], /must be a JSON object, got array/);
+
+  const rNumber = validateContentRecord(42);
+  assert.equal(rNumber.valid, false);
+  assert.match(rNumber.errors[0], /must be a JSON object, got number/);
+
+  const rString = validateContentRecord("malformed");
+  assert.equal(rString.valid, false);
+  assert.match(rString.errors[0], /must be a JSON object, got string/);
+});
+
+test("Schema validation rejects missing required properties including format", () => {
+  const withoutFormat = { ...MOCK_VALID_VIDEO };
+  delete withoutFormat.format;
+  const rFormat = validateContentRecord(withoutFormat, { isNewBatch: true });
+  assert.equal(rFormat.valid, false);
+  assert.match(rFormat.errors.join("; "), /Missing required property 'format'/);
+
+  const withoutTitle = { ...MOCK_VALID_VIDEO };
+  delete withoutTitle.title;
+  const rTitle = validateContentRecord(withoutTitle, { isNewBatch: true });
+  assert.equal(rTitle.valid, false);
+  assert.match(rTitle.errors.join("; "), /Missing required property 'title'/);
+
+  const withoutPoster = { ...MOCK_VALID_VIDEO };
+  delete withoutPoster.poster;
+  const rPoster = validateContentRecord(withoutPoster, { isNewBatch: true });
+  assert.equal(rPoster.valid, false);
+  assert.match(rPoster.errors.join("; "), /Missing required property 'poster'/);
+});
+
+test("Schema validation rejects unexpected properties across record, media, and editorial", () => {
+  const extraRecordKey = { ...MOCK_VALID_VIDEO, unexpectedField: "hack" };
+  const r1 = validateContentRecord(extraRecordKey);
+  assert.equal(r1.valid, false);
+  assert.match(r1.errors.join("; "), /Unexpected record property 'unexpectedField'/);
+
+  const extraMediaKey = {
+    ...MOCK_VALID_VIDEO,
+    media: { ...MOCK_VALID_VIDEO.media, unsupportedMediaProp: 123 },
+  };
+  const r2 = validateContentRecord(extraMediaKey);
+  assert.equal(r2.valid, false);
+  assert.match(r2.errors.join("; "), /Unexpected media property 'unsupportedMediaProp'/);
+
+  const extraEditorialKey = {
+    ...MOCK_VALID_VIDEO,
+    editorial: { ...MOCK_VALID_VIDEO.editorial, unsupportedEditorialProp: "note" },
+  };
+  const r3 = validateContentRecord(extraEditorialKey);
+  assert.equal(r3.valid, false);
+  assert.match(r3.errors.join("; "), /Unexpected editorial property 'unsupportedEditorialProp'/);
+});
+
+test("Schema validation rejects unsupported codecs and out-of-range media properties", () => {
+  const badVideoCodec = {
+    ...MOCK_VALID_VIDEO,
+    media: { ...MOCK_VALID_VIDEO.media, codec: "prores" },
+  };
+  const rCodec = validateContentRecord(badVideoCodec);
+  assert.equal(rCodec.valid, false);
+  assert.match(rCodec.errors.join("; "), /Unsupported codec 'prores'/);
+
+  const badAudioCodec = {
+    ...MOCK_VALID_VIDEO,
+    media: { ...MOCK_VALID_VIDEO.media, audioCodec: "flac" },
+  };
+  const rAudio = validateContentRecord(badAudioCodec);
+  assert.equal(rAudio.valid, false);
+  assert.match(rAudio.errors.join("; "), /Unsupported audioCodec 'flac'/);
+
+  const badWidth = {
+    ...MOCK_VALID_VIDEO,
+    media: { ...MOCK_VALID_VIDEO.media, width: 200 }, // minimum 320
+  };
+  const rWidth = validateContentRecord(badWidth);
+  assert.equal(rWidth.valid, false);
+  assert.match(rWidth.errors.join("; "), /media\.width must be an integer between 320 and 7680/);
+});
+
+test("Schema validation strictly rejects uppercase or malformed tags", () => {
+  const upperTag = validateContentRecord({ ...MOCK_VALID_VIDEO, tags: ["Anime", "Action"] });
+  assert.equal(upperTag.valid, false);
+  assert.match(upperTag.errors.join("; "), /Tag "Anime" contains invalid characters or uppercase letters/);
+
+  const spaceTag = validateContentRecord({ ...MOCK_VALID_VIDEO, tags: ["phonk music"] });
+  assert.equal(spaceTag.valid, false);
+  assert.match(spaceTag.errors.join("; "), /Tag "phonk music" contains invalid characters/);
+
+  const leadingHash = validateContentRecord({ ...MOCK_VALID_VIDEO, tags: ["#anime"] });
+  assert.equal(leadingHash.valid, false);
+  assert.match(leadingHash.errors.join("; "), /must not include leading '#' symbol/);
+});
+
+// -------------------------------------------------------------
+// FIX B: Separate Metadata Preparation from Asset Verification
+// -------------------------------------------------------------
+
+test("Metadata mode skips physical asset checks and reports status clearly", () => {
+  const manifest = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [
+      {
+        ...MOCK_VALID_VIDEO,
+        poster: "/media/nonexistent/future-poster.webp",
+        source: "/media/nonexistent/future-video.mp4",
+      },
+    ],
+  };
+
+  const result = validateContentManifest(manifest, {
+    fandomRegistry: FANDOM_REGISTRY,
+    mode: "metadata",
+    isNewBatch: true,
+  });
+
+  assert.equal(result.valid, true, `Metadata check failed: ${result.errors.join("; ")}`);
+  assert.equal(result.assetVerification, "SKIPPED (Metadata preparation mode)");
+});
+
+test("Asset verification mode requires staged files to exist and checks signatures", () => {
+  const manifest = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [
+      {
+        ...MOCK_VALID_VIDEO,
+        poster: "/media/nonexistent/future-poster.webp",
+        source: "/media/nonexistent/future-video.mp4",
+      },
+    ],
+  };
+
+  const result = validateContentManifest(manifest, {
+    fandomRegistry: FANDOM_REGISTRY,
+    mode: "assets",
+    isNewBatch: true,
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.assetVerification, "PERFORMED (Staged local assets verified)");
+  assert.match(result.errors.join("; "), /Poster asset verification failed/);
+  assert.match(result.errors.join("; "), /Source video verification failed/);
+});
+
+test("Asset verification prevents directory traversal outside public media/brand", () => {
+  const traversalRecord = {
+    ...MOCK_VALID_VIDEO,
+    poster: "/media/../../secret.png",
+  };
+  const result = validateContentRecord(traversalRecord, {
+    mode: "assets",
+    fandomRegistry: FANDOM_REGISTRY,
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join("; "), /resolves outside public\/media or public\/brand directory/);
+});
+
+test("Asset verification flags remote URLs requiring local staging", () => {
+  const remoteRecord = {
+    ...MOCK_VALID_VIDEO,
+    poster: "https://example.com/poster.webp",
+    source: "https://example.com/video.mp4",
+  };
+  const result = validateContentRecord(remoteRecord, { mode: "assets" });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join("; "), /Remote poster reference '.*' cannot be verified offline/);
+});
+
+test("Streaming asset inspection reads fixed-size header without reading entire file", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "lolixco-stream-test-"));
+  try {
+    const pngPath = join(tempDir, "stream-test.png");
+    // Write valid PNG header + 1MB of zeroes
+    const header = Buffer.from("89504e470d0a1a0a0000000d494844520000000100000001", "hex");
+    const zeroes = Buffer.alloc(1024 * 1024);
+    writeFileSync(pngPath, Buffer.concat([header, zeroes]));
+
+    const res = verifyAssetBytesStreaming(pngPath);
+    assert.equal(res.extension, ".png");
+    assert.equal(res.bytes > 1000000, true);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// -------------------------------------------------------------
+// FIX C: Enforce Editorial Publication Requirements
+// -------------------------------------------------------------
+
+test("Draft records are accepted in metadata mode but strictly rejected in publish mode", () => {
+  const draftRecord = {
+    ...MOCK_VALID_VIDEO,
+    editorial: {
+      reviewStatus: "draft",
+      rightsCleared: false,
+    },
+  };
+
+  // Accepted during metadata intake
+  const metaRes = validateContentRecord(draftRecord, { mode: "metadata", fandomRegistry: FANDOM_REGISTRY });
+  assert.equal(metaRes.valid, true);
+
+  // Rejected for publication readiness
+  const pubRes = validateContentRecord(draftRecord, { mode: "publish", fandomRegistry: FANDOM_REGISTRY });
+  assert.equal(pubRes.valid, false);
+  assert.match(pubRes.errors.join("; "), /reviewStatus is "draft"\. Only "approved" or "published"/);
+  assert.match(pubRes.errors.join("; "), /rightsCleared is not true/);
+});
+
+test("Missing editorial review block prevents publication", () => {
+  const unreviewed = { ...MOCK_VALID_VIDEO };
+  delete unreviewed.editorial;
+
+  const pubRes = validateContentRecord(unreviewed, { mode: "publish", fandomRegistry: FANDOM_REGISTRY });
+  assert.equal(pubRes.valid, false);
+  assert.match(pubRes.errors.join("; "), /Missing editorial review block/);
+});
+
+test("projectToPublicEdit enforces strict publication clearance boundary", () => {
+  const draftRecord = {
+    ...MOCK_VALID_VIDEO,
+    editorial: {
+      reviewStatus: "draft",
+      rightsCleared: false,
+    },
+  };
+
+  // Strict projection throws on unapproved record
+  assert.throws(
+    () => projectToPublicEdit(draftRecord, { strict: true }),
+    /Cannot project item 101 to public catalog: editorial reviewStatus must be 'approved' or 'published'/
+  );
+
+  // Approved record projects safely and completely strips private editorial data
+  const approvedRecord = {
+    ...MOCK_VALID_VIDEO,
+    editorial: {
+      reviewStatus: "approved",
+      rightsCleared: true,
+      sourceAttribution: "Private Creator Info",
+      curatorNotes: "Private Notes",
+      ownerAssetRef: "REF123",
+    },
+  };
+
+  const publicEdit = projectToPublicEdit(approvedRecord, { strict: true });
+  assert.equal(publicEdit.id, 101);
+  assert.equal(publicEdit.creator, "Lolixco curated");
+  assert.equal("editorial" in publicEdit, false);
+  assert.equal("sourceAttribution" in publicEdit, false);
+  assert.equal("curatorNotes" in publicEdit, false);
+  assert.equal("rightsCleared" in publicEdit, false);
+});
+
+// -------------------------------------------------------------
+// FIX D: Hypothetical Sample Manifest Template
+// -------------------------------------------------------------
+
+test("Manifest template passes metadata check but correctly fails publish mode due to draft status", async () => {
+  const templateModule = await import("../content/manifest.template.json", {
+    with: { type: "json" },
+  });
+
+  const metaRes = validateContentManifest(templateModule.default, {
+    fandomRegistry: FANDOM_REGISTRY,
+    mode: "metadata",
+    isNewBatch: true,
+  });
+  assert.equal(metaRes.valid, true, `Template failed metadata mode: ${metaRes.errors.join("; ")}`);
+
+  const pubRes = validateContentManifest(templateModule.default, {
+    fandomRegistry: FANDOM_REGISTRY,
+    mode: "publish",
+    isNewBatch: true,
+  });
+  assert.equal(pubRes.valid, false);
+  assert.match(pubRes.errors.join("; "), /reviewStatus is "draft"/);
+  assert.match(pubRes.errors.join("; "), /rightsCleared is not true/);
+});
+
+// -------------------------------------------------------------
+// FIX E: Enforce ID Allocation Policy & Conflicts
+// -------------------------------------------------------------
+
+test("ID allocation enforces 100-199 for landscape videos and 200-299 for Shorts", () => {
+  // Video with short ID 205
+  const videoInShortRange = validateContentRecord(
+    { ...MOCK_VALID_VIDEO, id: 205, format: "video" },
+    { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
+  );
+  assert.equal(videoInShortRange.valid, false);
+  assert.match(videoInShortRange.errors.join("; "), /Landscape video ID 205 must be in range 100-199/);
+
+  // Short with video ID 105
+  const shortInVideoRange = validateContentRecord(
+    { ...MOCK_VALID_SHORT, id: 105, format: "short" },
+    { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
+  );
+  assert.equal(shortInVideoRange.valid, false);
+  assert.match(shortInVideoRange.errors.join("; "), /Curated Short ID 105 must be in range 200-299/);
+
+  // New item with demo ID 5
+  const demoCollision = validateContentRecord(
+    { ...MOCK_VALID_VIDEO, id: 5 },
+    { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
+  );
+  assert.equal(demoCollision.valid, false);
+  assert.match(demoCollision.errors.join("; "), /ID 5 is reserved for baseline demo edits/);
+
+  // New item with internal test harness ID 50
+  const reservedCollision = validateContentRecord(
+    { ...MOCK_VALID_VIDEO, id: 50 },
+    { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
+  );
+  assert.equal(reservedCollision.valid, false);
+  assert.match(reservedCollision.errors.join("; "), /ID 50 is reserved for internal test harnesses/);
+});
+
+test("Manifest validation checks duplicate IDs against incoming items and existing catalog", () => {
+  const manifest = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [
+      { ...MOCK_VALID_VIDEO, id: 101 },
+      { ...MOCK_VALID_VIDEO, id: 101 }, // duplicate
+    ],
+  };
+
+  const res = validateContentManifest(manifest, {
+    fandomRegistry: FANDOM_REGISTRY,
+    mode: "metadata",
+    isNewBatch: true,
+  });
+  assert.equal(res.valid, false);
+  assert.match(res.errors.join("; "), /Duplicate ID: 101/);
+
+  // Collision against existing catalog IDs (0-16)
+  const manifestCollidingWithLive = {
+    manifestVersion: "1.0.0",
+    catalogVersion: "catalog-v2",
+    items: [
+      { ...MOCK_VALID_VIDEO, id: 0 }, // Collides with demo edit 0
+    ],
+  };
+  const liveCollisionRes = validateContentManifest(manifestCollidingWithLive, {
+    fandomRegistry: FANDOM_REGISTRY,
+    existingCatalog: edits,
+    mode: "metadata",
+    isNewBatch: true,
+  });
+  assert.equal(liveCollisionRes.valid, false);
+  assert.match(liveCollisionRes.errors.join("; "), /Duplicate ID: 0/);
+});
+
+// -------------------------------------------------------------
+// FIX F: Production Baseline Invariants
+// -------------------------------------------------------------
+
+test("Live production catalog retains exactly 17 demo edits and zero Shorts", async () => {
   const result = await validateLiveCatalog();
-  assert.equal(result.valid, true, `Validation errors: ${result.errors.join("; ")}`);
+  assert.equal(result.valid, true, `Live catalog errors: ${result.errors.join("; ")}`);
   assert.equal(result.summary.total, 17);
   assert.equal(result.summary.videos, 17);
   assert.equal(result.summary.shorts, 0);
   assert.equal(edits.length, 17);
   assert.equal(edits.filter((e) => e.format === "short").length, 0);
-});
-
-test("Manifest template is 100% valid according to validation engine", async () => {
-  const templateModule = await import("../content/manifest.template.json", {
-    with: { type: "json" },
-  });
-  const result = validateContentManifest(templateModule.default, {
-    fandomRegistry: FANDOM_REGISTRY,
-    isNewBatch: true,
-  });
-  assert.equal(result.valid, true, `Template errors: ${result.errors.join("; ")}`);
-  assert.equal(result.summary.total, 2);
-  assert.equal(result.summary.videos, 1);
-  assert.equal(result.summary.shorts, 1);
-});
-
-test("Validation rejects duplicate IDs within a batch", () => {
-  const seenIds = new Set([101]);
-  const result = validateContentRecord(MOCK_VALID_VIDEO, {
-    seenIds,
-    fandomRegistry: FANDOM_REGISTRY,
-  });
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join(" "), /Duplicate ID: 101/);
-});
-
-test("Validation rejects non-integer or negative IDs", () => {
-  const r1 = validateContentRecord({ ...MOCK_VALID_VIDEO, id: -1 });
-  assert.equal(r1.valid, false);
-  assert.match(r1.errors.join(" "), /must be non-negative integer/);
-
-  const r2 = validateContentRecord({ ...MOCK_VALID_VIDEO, id: 10.5 });
-  assert.equal(r2.valid, false);
-  assert.match(r2.errors.join(" "), /must be non-negative integer/);
-
-  const r3 = validateContentRecord({ ...MOCK_VALID_VIDEO, id: "101" });
-  assert.equal(r3.valid, false);
-  assert.match(r3.errors.join(" "), /must be non-negative integer/);
-});
-
-test("Validation rejects reserved demo IDs (0-16) when ingesting new batches", () => {
-  const result = validateContentRecord(
-    { ...MOCK_VALID_VIDEO, id: 5 },
-    { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
-  );
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join(" "), /Reserved ID conflict: ID 5 is reserved for baseline demo edits/);
-});
-
-test("Validation permits reserved demo IDs (0-16) when validating existing catalog", () => {
-  const result = validateContentRecord(
-    { ...MOCK_VALID_VIDEO, id: 5 },
-    { isNewBatch: false, fandomRegistry: FANDOM_REGISTRY }
-  );
-  assert.equal(result.valid, true);
-});
-
-test("Validation rejects legacy 'Cinematic' category for new content batches", () => {
-  const result = validateContentRecord(
-    { ...MOCK_VALID_VIDEO, id: 102, category: "Cinematic", fandomIds: [] },
-    { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
-  );
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join(" "), /Legacy category "Cinematic" is strictly reserved for demo edits/);
-});
-
-test("Validation accepts canonical categories for new content batches", () => {
-  for (const cat of ["Anime", "Movies", "Series", "Multifandom", "Gaming", "Phonk"]) {
-    const res = validateContentRecord(
-      { ...MOCK_VALID_VIDEO, id: 105, category: cat, fandomIds: [] },
-      { isNewBatch: true, fandomRegistry: FANDOM_REGISTRY }
-    );
-    assert.equal(res.valid, true, `Category ${cat} failed: ${res.errors.join(", ")}`);
-  }
-});
-
-test("Validation rejects unrecognized fandom IDs", () => {
-  const result = validateContentRecord(
-    { ...MOCK_VALID_VIDEO, fandomIds: ["non-existent-fandom"] },
-    { fandomRegistry: FANDOM_REGISTRY }
-  );
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join(" "), /Unrecognized fandom ID: "non-existent-fandom"/);
-});
-
-test("Validation enforces category-fandom compatibility", () => {
-  // spider-man belongs to Movies, not Anime
-  const incompatible = validateContentRecord(
-    { ...MOCK_VALID_VIDEO, category: "Anime", fandomIds: ["spider-man"] },
-    { fandomRegistry: FANDOM_REGISTRY }
-  );
-  assert.equal(incompatible.valid, false);
-  assert.match(incompatible.errors.join(" "), /incompatible with category "Anime"/);
-
-  // Multifandom allows multiple fandoms across different categories
-  const multifandom = validateContentRecord(
-    { ...MOCK_VALID_VIDEO, category: "Multifandom", fandomIds: ["spider-man", "jujutsu-kaisen"] },
-    { fandomRegistry: FANDOM_REGISTRY }
-  );
-  assert.equal(multifandom.valid, true);
-});
-
-test("Validation rejects malformed or invalid tags", () => {
-  const emptyTags = validateContentRecord({ ...MOCK_VALID_VIDEO, tags: [] });
-  assert.equal(emptyTags.valid, false);
-
-  const hashTags = validateContentRecord({ ...MOCK_VALID_VIDEO, tags: ["#anime"] });
-  assert.equal(hashTags.valid, false);
-  assert.match(hashTags.errors.join(" "), /must not include leading '#' symbol/);
-
-  const invalidChars = validateContentRecord({ ...MOCK_VALID_VIDEO, tags: ["anime!edit"] });
-  assert.equal(invalidChars.valid, false);
-  assert.match(invalidChars.errors.join(" "), /contains invalid characters/);
-});
-
-test("Validation enforces format and aspect ratio consistency", () => {
-  // Video claiming 9:16 aspect ratio
-  const invertedVideo = validateContentRecord({
-    ...MOCK_VALID_VIDEO,
-    format: "video",
-    media: { aspectRatio: "9:16", width: 1080, height: 1920 },
-  });
-  assert.equal(invertedVideo.valid, false);
-  assert.match(invertedVideo.errors.join(" "), /cannot declare vertical aspect ratio "9:16"/);
-
-  // Short claiming 16:9 aspect ratio
-  const invertedShort = validateContentRecord({
-    ...MOCK_VALID_SHORT,
-    format: "short",
-    media: { aspectRatio: "16:9", width: 1920, height: 1080 },
-  });
-  assert.equal(invertedShort.valid, false);
-  assert.match(invertedShort.errors.join(" "), /must have aspect ratio "9:16"/);
-});
-
-test("Validation rejects missing required strings (title, description, duration)", () => {
-  const noTitle = validateContentRecord({ ...MOCK_VALID_VIDEO, title: "" });
-  assert.equal(noTitle.valid, false);
-
-  const noDesc = validateContentRecord({ ...MOCK_VALID_VIDEO, description: "" });
-  assert.equal(noDesc.valid, false);
-
-  const badDuration = validateContentRecord({ ...MOCK_VALID_VIDEO, duration: "invalid" });
-  assert.equal(badDuration.valid, false);
-  assert.match(badDuration.errors.join(" "), /Invalid duration/);
-});
-
-test("Validation rejects private editorial fields at the public root level", () => {
-  const leakedRecord = {
-    ...MOCK_VALID_VIDEO,
-    curatorNotes: "Secret note that should not be in public JSON",
-    rightsCleared: true,
-  };
-  const result = validateContentRecord(leakedRecord);
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join(" "), /Private editorial field "curatorNotes" must be encapsulated/);
-});
-
-test("projectToPublicEdit produces clean public object without editorial leaks", () => {
-  const publicRecord = projectToPublicEdit(MOCK_VALID_VIDEO);
-  assert.equal(publicRecord.id, 101);
-  assert.equal(publicRecord.format, "video");
-  assert.equal(publicRecord.title, MOCK_VALID_VIDEO.title);
-  assert.equal(publicRecord.category, "Anime");
-  assert.deepEqual(publicRecord.fandomIds, ["jujutsu-kaisen"]);
-  assert.equal("editorial" in publicRecord, false);
-  assert.equal("curatorNotes" in publicRecord, false);
-  assert.equal("rightsCleared" in publicRecord, false);
-  assert.equal("sourceAttribution" in publicRecord, false);
-});
-
-test("Asset magic byte validation detects valid and invalid files", () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "lolixco-test-assets-"));
-  try {
-    // 1. Valid SVG
-    const svgPath = join(tempDir, "test.svg");
-    writeFileSync(svgPath, "<svg xmlns='http://www.w3.org/2000/svg'><circle/></svg>");
-    assert.doesNotThrow(() => verifyAssetBytes(svgPath));
-
-    // 2. Corrupt SVG
-    const badSvgPath = join(tempDir, "bad.svg");
-    writeFileSync(badSvgPath, "plain text not svg");
-    assert.throws(() => verifyAssetBytes(badSvgPath), /missing <svg element/);
-
-    // 3. Valid PNG
-    const pngPath = join(tempDir, "test.png");
-    const pngBuf = Buffer.from("89504e470d0a1a0a0000000d494844520000000100000001", "hex");
-    writeFileSync(pngPath, pngBuf);
-    assert.doesNotThrow(() => verifyAssetBytes(pngPath));
-
-    // 4. Corrupt PNG
-    const badPngPath = join(tempDir, "bad.png");
-    writeFileSync(badPngPath, Buffer.from("12345678", "hex"));
-    assert.throws(() => verifyAssetBytes(badPngPath), /Invalid PNG header signature/);
-
-    // 5. Valid MP4
-    const mp4Path = join(tempDir, "test.mp4");
-    // [4 bytes length][ftyp][4 bytes major brand]
-    const mp4Buf = Buffer.concat([
-      Buffer.from([0, 0, 0, 24]),
-      Buffer.from("ftyp", "ascii"),
-      Buffer.from("isom0000", "ascii"),
-    ]);
-    writeFileSync(mp4Path, mp4Buf);
-    assert.doesNotThrow(() => verifyAssetBytes(mp4Path));
-
-    // 6. Corrupt MP4
-    const badMp4Path = join(tempDir, "bad.mp4");
-    writeFileSync(badMp4Path, Buffer.from("00000018moov00000000", "ascii"));
-    assert.throws(() => verifyAssetBytes(badMp4Path), /Invalid MP4 header signature/);
-
-    // 7. Valid WebM
-    const webmPath = join(tempDir, "test.webm");
-    writeFileSync(webmPath, Buffer.from("1a45dfa39f4286810142f7", "hex"));
-    assert.doesNotThrow(() => verifyAssetBytes(webmPath));
-
-    // 8. Valid WebP
-    const webpPath = join(tempDir, "test.webp");
-    const webpBuf = Buffer.concat([
-      Buffer.from("RIFF", "ascii"),
-      Buffer.from([100, 0, 0, 0]),
-      Buffer.from("WEBP", "ascii"),
-    ]);
-    writeFileSync(webpPath, webpBuf);
-    assert.doesNotThrow(() => verifyAssetBytes(webpPath));
-
-    // 9. Valid JPEG
-    const jpgPath = join(tempDir, "test.jpg");
-    writeFileSync(jpgPath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
-    assert.doesNotThrow(() => verifyAssetBytes(jpgPath));
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
 });

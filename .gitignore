@@ -161,3 +161,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Private content intake manifests and staged assets
+content/manifest.json
+content/*.private.json
+content/staging/
+public/media/staging/
+

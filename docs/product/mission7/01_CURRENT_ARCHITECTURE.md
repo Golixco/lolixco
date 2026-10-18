@@ -7,6 +7,7 @@ Lolixco currently operates on **`demo-catalog-v1`**, consisting of exactly **17 
 2. A deterministic Python recommendation service in [`server/recsys/`](file:///home/vuld0/Lolixco/server/recsys/) validated against [`server/recsys/catalog_snapshot.json`](file:///home/vuld0/Lolixco/server/recsys/catalog_snapshot.json).
 3. A format-aware feed composition engine in [`src/data/feedComposition.ts`](file:///home/vuld0/Lolixco/src/data/feedComposition.ts) that differentiates landscape videos from portrait Shorts.
 4. Static media assets validated by [`scripts/check-assets.mjs`](file:///home/vuld0/Lolixco/scripts/check-assets.mjs).
+5. The content validation engine in [`scripts/validate-content.mjs`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs) wired into CI via `npm run check:content`.
 
 This document audits what functions well today and identifies the architectural adaptations required to ingest genuine owner-supplied media (~50 landscape videos and ~20 portrait Shorts).
 
@@ -94,18 +95,12 @@ The Python recommendation service and test suite enforce strict contracts that m
 
 ---
 
-## 3. Asset Validation Architecture (`scripts/check-assets.mjs`)
+## 3. Ingestion and Validation Engine (`scripts/validate-content.mjs`)
 
-- Inspects all entries in `assetPaths` ([`src/data/media-assets.js`](file:///home/vuld0/Lolixco/src/data/media-assets.js)) and regex-matched paths in `src/`.
-- Verifies file existence, non-zero file size, and magic bytes for:
-  - SVG: contains `<svg`
-  - PNG: `89504e470d0a1a0a`
-  - WebM: `1a45dfa3`
-- **Gaps Identified for Real Media:**
-  - Does not currently inspect MP4 / M4V (`ftyp` box).
-  - Does not currently inspect JPEG (`ffd8ff`).
-  - Does not currently inspect WebP (`RIFF....WEBP`).
-  - Does not inspect aspect ratios or video dimensions.
+The validation foundation provides authoritative schema validation and three distinct operational workflows:
+1. **Metadata Preparation Mode (`--mode metadata`):** Validates manifest schema, taxonomy, ID range rules, string constraints, and declared aspect ratios without requiring media files to be present on disk. Explicitly reports asset verification as `SKIPPED`.
+2. **Asset Verification Mode (`--mode assets`):** Verifies that local asset paths resolve strictly inside `public/media/` or `public/brand/`, confirms file existence and non-zero size, and checks header signatures without reading full video files into memory. Flags remote URLs.
+3. **Publication Readiness Mode (`--mode publish`):** Requires clean metadata, clean staged assets, approved editorial review (`reviewStatus: "approved" | "published"`), and documented rights clearance (`rightsCleared: true`). Reports ffprobe stream inspection status.
 
 ---
 
@@ -116,6 +111,6 @@ The Python recommendation service and test suite enforce strict contracts that m
 | **Catalog IDs** | Integers `0-16` | Retain `0-16` for demo items. Ingested landscape videos use `100-199`; Shorts use `200-299`. |
 | **Shorts Content** | 0 Shorts | Prepare manifest template and validation for ~20 portrait Shorts without fabricating dummy entries. |
 | **Taxonomy** | 5 fandoms, 6 categories | Support `Multifandom` category, allow owner to submit additional registered fandoms. Prohibit `Cinematic` for new IDs. |
-| **Asset Formats** | SVG, PNG, WebM | Expand verification to MP4, WebP, JPEG, and validate 16:9 vs 9:16 aspect ratios. |
+| **Asset Formats** | SVG, PNG, WebM | Expanded streaming header verification for MP4, WebP, JPEG, and validate 16:9 vs 9:16 aspect ratios. |
 | **Metadata Ingest** | Hardcoded array in `.ts` | Owner-friendly JSON manifest with JSON Schema validation and separated private editorial fields. |
 | **Recsys Sync** | Hardcoded 10-field check | Document clean migration path from `demo-catalog-v1` to `catalog-v2` when real content arrives. |
