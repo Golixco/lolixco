@@ -63,3 +63,22 @@ export interface EditorialMetadata {
   originalAspectRatio?: "16:9" | "9:16" | "4:3" | "2.39:1";
   legacyCreatorId?: string;
 }
+
+/**
+ * Format-aware feed section model.
+ * Distinguishes landscape video rows from portrait shorts shelves.
+ */
+export type FeedSection<T = import("../data/edits").Edit> =
+  | {
+      type: "video_row";
+      id: string;
+      title: string;
+      items: T[];
+    }
+  | {
+      type: "shorts_shelf";
+      id: string;
+      title: string;
+      items: T[];
+    };
+
