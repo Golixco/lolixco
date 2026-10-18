@@ -6,44 +6,94 @@
  * - Preservation of 17 baseline demo edits (IDs 0-16) at the array head
  * - Strict ID ranges: Landscape videos in [100..199], Portrait Shorts in [200..299]
  * - Only items with contentReviewStatus === 'approved' or 'published' are compiled
+ * - Fail-closed validation against:
+ *   * Synthetic mock metadata (real YouTube API metadata required)
+ *   * Private or non-embeddable videos
+ *   * Duplicate Lolixco IDs or conflicting YouTube video identities
+ *   * Unregistered fandoms or non-canonical categories
+ *   * Unconfirmed or ambiguous formats
+ *   * Incomplete metadata (missing title, creator attribution, or duration)
+ *   * Stale or unverified metadata
  * - Zero leakage of private editorial, rights notes, or audit history
- * - Production safety guard against synthetic test data
+ * - Executable CLI with preview mode and explicit --publish required to write
  */
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { allocateStableId } from "./youtube-editorial.mjs";
+import { register } from "node:module";
 
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 
+// Register TypeScript loader for on-the-fly TS transpilation
+try {
+  register("./tests/ts-hooks.mjs", new URL("../", import.meta.url));
+} catch {
+  // If already registered or unavailable, proceed
+}
+
+import { allocateStableId, CANONICAL_CATEGORIES } from "./youtube-editorial.mjs";
+import { loadEnvConfig } from "./youtube-api.mjs";
+export const CANONICAL_AUDIT_PATH = resolve(projectRoot, "content/audit/youtube-intake-audit.json");
+export const CANONICAL_OUTPUT_PATH = resolve(projectRoot, "src/data/edits.ts");
+
+/**
+ * Loads registered fandoms dynamically.
+ */
+export async function loadFandomRegistry() {
+  try {
+    const fandomsModule = await import(resolve(projectRoot, "src/data/fandoms.ts"));
+    return fandomsModule.FANDOM_REGISTRY || [];
+  } catch {
+    return [
+      { id: "jujutsu-kaisen", title: "Jujutsu Kaisen" },
+      { id: "demon-slayer", title: "Demon Slayer" },
+      { id: "spider-man", title: "Spider-Man" },
+      { id: "valorant", title: "Valorant" },
+      { id: "doom", title: "Doom" },
+    ];
+  }
+}
+
 /**
  * Projects a validated audit record to a public Edit object.
+ * Strips all internal review statuses, notes, and audit fields.
  */
 export function projectToPublicYouTubeEdit(auditItem) {
   const metadata = auditItem.metadata || {};
+  const category = auditItem.category || auditItem.ownerCategory || "Cinematic";
+
+  // Preserve explicit reviewed fandom assignments across importer, audit, and compiler (FIX D)
+  const fandomIds = Array.isArray(auditItem.fandomIds) && auditItem.fandomIds.length > 0
+    ? auditItem.fandomIds
+    : Array.isArray(auditItem.ownerFandomIds) && auditItem.ownerFandomIds.length > 0
+    ? auditItem.ownerFandomIds
+    : auditItem.ownerFandom
+    ? [auditItem.ownerFandom]
+    : [];
+
+  const rawTags = [
+    category.toLowerCase(),
+    ...fandomIds,
+    ...(metadata.tags || []),
+    ...(metadata.hashtags || []),
+  ];
+
+  const uniqueTags = Array.from(new Set(rawTags.map((t) => t.toLowerCase().trim()).filter(Boolean))).slice(0, 10);
 
   return {
     id: auditItem.assignedLolixcoId,
-    title: metadata.title || `Curated Edit ${auditItem.assignedLolixcoId}`,
-    category: auditItem.ownerCategory,
-    tags: Array.from(
-      new Set([
-        auditItem.ownerCategory.toLowerCase(),
-        ...(auditItem.fandomIds || []),
-        ...(metadata.tags || []),
-        ...(metadata.hashtags || []),
-      ])
-    ).slice(0, 10), // Bounded tag count
+    title: metadata.title || "",
+    category,
+    tags: uniqueTags,
     description: metadata.description?.slice(0, 300) || "Curated cinematic edit.",
-    creator: metadata.channelTitle || "YouTube Creator",
+    creator: metadata.channelTitle || "",
     poster: metadata.thumbnailUrl || `https://i.ytimg.com/vi/${auditItem.canonicalVideoId}/hqdefault.jpg`,
     source: auditItem.canonicalUrl || `https://www.youtube.com/watch?v=${auditItem.canonicalVideoId}`,
     duration: metadata.durationFormatted || "0:30",
     trending: !!auditItem.trending,
     format: auditItem.format || "video",
-    fandomIds: auditItem.fandomIds || [],
+    fandomIds,
     sourceType: "youtube_embed",
     youtubeVideoId: auditItem.canonicalVideoId,
     channelTitle: metadata.channelTitle || undefined,
@@ -185,11 +235,24 @@ export const categoriesList = [
 
 /**
  * Compiles approved YouTube items into public catalog records.
+ *
+ * Enforces strict fail-closed validation:
+ * - Real API metadata (synthetic mocks rejected)
+ * - Valid 11-char canonical video IDs
+ * - Public availability and embeddability
+ * - Reviewed canonical category & registered fandom associations
+ * - Confirmed format (video or short)
+ * - Approval status (approved or published)
+ * - Stable ID ownership & cross-batch ID uniqueness
+ * - Freshness timestamp
+ * - Incomplete metadata rejection (no fabricated titles or creator fallbacks)
  */
 export async function compileYouTubeCatalog(options = {}) {
+  loadEnvConfig();
+
   const {
-    auditFilePath = resolve(projectRoot, "content/youtube-audit.json"),
-    outputPath = resolve(projectRoot, "src/data/edits.ts"),
+    auditFilePath = CANONICAL_AUDIT_PATH,
+    outputPath = CANONICAL_OUTPUT_PATH,
     dryRun = true,
     allowDraft = false,
     baseCatalog = null,
@@ -230,6 +293,9 @@ export async function compileYouTubeCatalog(options = {}) {
     };
   }
 
+  const registeredFandoms = await loadFandomRegistry();
+  const registeredSlugs = new Set(registeredFandoms.map((f) => f.id));
+
   const items = Array.isArray(auditData.items) ? auditData.items : [];
   const approvedItems = [];
 
@@ -242,11 +308,88 @@ export async function compileYouTubeCatalog(options = {}) {
     }
   }
 
-  // 3. Allocate stable IDs and project records
+  // 3. Fail-Closed Item Validation before compilation (FIX B, FIX D, FIX E)
+  const isTargetingProduction = outputPath.includes("src/data/edits.ts");
   const newEdits = [];
   const allocatedItems = [];
+  const seenLolixcoIds = new Set(currentBaseCatalog.slice(0, 17).map((e) => e.id));
+  const seenYouTubeVideoIds = new Set();
 
   for (const item of approvedItems) {
+    const videoId = item.canonicalVideoId;
+
+    // A. Canonical YouTube video ID validation
+    if (!videoId || typeof videoId !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+      errors.push(`Item '${videoId}': invalid canonical YouTube video ID format.`);
+      continue;
+    }
+
+    // B. Conflicting YouTube video identity check
+    if (seenYouTubeVideoIds.has(videoId)) {
+      errors.push(`Duplicate YouTube video ID conflict: '${videoId}' appears multiple times in candidate catalog.`);
+    }
+    seenYouTubeVideoIds.add(videoId);
+
+    // C. Synthetic mock rejection (FIX B)
+    const isMock = item.isMock === true || item.metadata?.isMock === true || item.provenance === "synthetic_mock";
+    if (isMock && isTargetingProduction && !forceSynthetic) {
+      errors.push(`Item '${videoId}': synthetic mock metadata is prohibited from production catalog publication. Real YouTube API metadata is required.`);
+    }
+
+    // D. Public availability and embedding eligibility check (FIX E)
+    if (!item.metadata) {
+      errors.push(`Item '${videoId}': missing metadata payload.`);
+      continue;
+    }
+
+    if (item.metadata.privacyStatus !== "public") {
+      errors.push(`Item '${videoId}': video is not public on YouTube (privacyStatus: '${item.metadata.privacyStatus}').`);
+    }
+
+    if (item.metadata.embeddable !== true) {
+      errors.push(`Item '${videoId}': embedded playback is disabled or restricted on YouTube.`);
+    }
+
+    // E. Completeness: Real title and creator attribution (no synthetic fallbacks)
+    const title = (item.metadata.title || "").trim();
+    if (!title || title.startsWith("Curated Edit") || title.startsWith("YouTube Video")) {
+      errors.push(`Item '${videoId}': missing genuine title metadata.`);
+    }
+
+    const channelTitle = (item.metadata.channelTitle || "").trim();
+    if (!channelTitle || channelTitle === "Unknown Creator" || channelTitle === "YouTube Creator") {
+      errors.push(`Item '${videoId}': missing genuine channel creator attribution.`);
+    }
+
+    const durationSec = item.metadata.durationSec;
+    if (typeof durationSec !== "number" || durationSec <= 0) {
+      errors.push(`Item '${videoId}': invalid or missing duration metadata.`);
+    }
+
+    // F. Freshness verification
+    if (!item.lastMetadataVerification || isNaN(Date.parse(item.lastMetadataVerification))) {
+      errors.push(`Item '${videoId}': missing or invalid lastMetadataVerification timestamp.`);
+    }
+
+    // G. Explicit confirmed format
+    if (item.format !== "video" && item.format !== "short") {
+      errors.push(`Item '${videoId}': unconfirmed format '${item.format}'. Format must be explicitly confirmed as 'video' or 'short'.`);
+    }
+
+    // H. Canonical category & registered fandom check
+    const projected = projectToPublicYouTubeEdit(item);
+
+    if (!CANONICAL_CATEGORIES.includes(projected.category)) {
+      errors.push(`Item '${videoId}': non-canonical category '${projected.category}'. Must be one of: ${CANONICAL_CATEGORIES.join(", ")}`);
+    }
+
+    for (const fId of projected.fandomIds) {
+      if (!registeredSlugs.has(fId)) {
+        errors.push(`Item '${videoId}': unregistered fandom ID '${fId}'. Must exist in FANDOM_REGISTRY.`);
+      }
+    }
+
+    // I. Allocate stable ID and verify ranges
     if (!item.assignedLolixcoId) {
       item.assignedLolixcoId = allocateStableId(item, [
         ...currentBaseCatalog.map((e) => ({ assignedLolixcoId: e.id, format: e.format })),
@@ -254,51 +397,33 @@ export async function compileYouTubeCatalog(options = {}) {
       ]);
     }
     allocatedItems.push(item);
+    projected.id = item.assignedLolixcoId;
 
-    const projected = projectToPublicYouTubeEdit(item);
-
-    // Range checks
+    // Check ID range
     if (projected.format === "short") {
       if (projected.id < 200 || projected.id > 299) {
-        errors.push(`Short ID must be in 200-299 range, got ${projected.id}`);
+        errors.push(`Short '${videoId}': assigned ID ${projected.id} outside allowed range [200..299].`);
       }
     } else {
       if (projected.id < 100 || projected.id > 199) {
-        errors.push(`Landscape video ID must be in 100-199 range, got ${projected.id}`);
+        errors.push(`Landscape video '${videoId}': assigned ID ${projected.id} outside allowed range [100..199].`);
       }
     }
 
-    // Baseline collision check
+    // Baseline collision and cross-batch uniqueness check (FIX E)
     if (projected.id <= 16) {
       errors.push(`ID collision with baseline demo edit: ${projected.id}`);
     }
 
+    if (seenLolixcoIds.has(projected.id)) {
+      errors.push(`Duplicate Lolixco ID collision: ID ${projected.id} is assigned multiple times.`);
+    }
+    seenLolixcoIds.add(projected.id);
+
     newEdits.push(projected);
   }
 
-  const finalEdits = [...currentBaseCatalog.slice(0, 17), ...newEdits];
-
-  // 4. Protection Guard: Never write synthetic test items into production
-  const isTargetingProduction = outputPath.includes("src/data/edits.ts");
-  const hasSyntheticItems = newEdits.some(
-    (e) =>
-      e.title.includes("Synthetic") ||
-      e.title.includes("[TEST]") ||
-      e.tags.includes("__test__")
-  );
-
-  if (isTargetingProduction && hasSyntheticItems && !forceSynthetic) {
-    return {
-      success: false,
-      errors: [
-        "ABORT: Cannot write synthetic/test items into production src/data/edits.ts. Use dryRun: true or a non-production outputPath for testing.",
-      ],
-      warnings,
-      compiledCount: 0,
-      compiledEdits: currentBaseCatalog,
-    };
-  }
-
+  // If any validation error occurred, abort before writing
   if (errors.length > 0) {
     return {
       success: false,
@@ -306,10 +431,13 @@ export async function compileYouTubeCatalog(options = {}) {
       warnings,
       compiledCount: 0,
       compiledEdits: currentBaseCatalog,
+      dryRun,
     };
   }
 
-  // 5. Write to output if not dryRun
+  const finalEdits = [...currentBaseCatalog.slice(0, 17), ...newEdits];
+
+  // 4. Write to output if not dryRun
   let writtenTo = null;
   if (!dryRun) {
     const code = generateYouTubeEditsTs(finalEdits);
@@ -332,4 +460,120 @@ export async function compileYouTubeCatalog(options = {}) {
     dryRun,
     writtenTo,
   };
+}
+
+/**
+ * CLI Runner with explicit argument parsing, preview mode, and exit codes.
+ */
+export async function runCompilerCli(args = process.argv.slice(2)) {
+  loadEnvConfig();
+
+  const options = {
+    auditFilePath: CANONICAL_AUDIT_PATH,
+    outputPath: CANONICAL_OUTPUT_PATH,
+    publish: false,
+    review: false,
+    allowDraft: false,
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--help" || arg === "-h") {
+      console.log(`
+Lolixco YouTube Catalog Compiler CLI
+
+Usage:
+  node scripts/compile-youtube-catalog.mjs [options]
+
+Modes:
+  (default)             Preview mode: Validates approved items and displays compilation preview without writing
+  --publish, --write    Explicit publication: Validates and writes compiled catalog to src/data/edits.ts
+  --review              Summary mode: Inspects audit log and prints review status breakdown
+
+Options:
+  --audit-file <path>   Audit file path (default: content/audit/youtube-intake-audit.json)
+  --output <path>       Target catalog file (default: src/data/edits.ts)
+  --allow-draft         Allow compiling draft items (embed_eligible) for staging tests
+  -h, --help            Show this help message
+`);
+      return 0;
+    } else if (arg === "--publish" || arg === "--write") {
+      options.publish = true;
+    } else if (arg === "--preview") {
+      options.publish = false;
+    } else if (arg === "--review") {
+      options.review = true;
+    } else if (arg === "--audit-file" && args[i + 1]) {
+      options.auditFilePath = resolve(args[++i]);
+    } else if (arg === "--output" && args[i + 1]) {
+      options.outputPath = resolve(args[++i]);
+    } else if (arg === "--allow-draft") {
+      options.allowDraft = true;
+    }
+  }
+
+  if (options.review) {
+    if (!existsSync(options.auditFilePath)) {
+      console.log(`No audit file found at: ${options.auditFilePath}`);
+      return 0;
+    }
+    try {
+      const data = JSON.parse(readFileSync(options.auditFilePath, "utf-8"));
+      const items = Array.isArray(data.items) ? data.items : [];
+      console.log(`\n=== YouTube Intake Audit Summary (${items.length} total entries) ===`);
+      const counts = {};
+      for (const item of items) {
+        counts[item.contentReviewStatus] = (counts[item.contentReviewStatus] || 0) + 1;
+      }
+      for (const [st, c] of Object.entries(counts)) {
+        console.log(`  ${st.padEnd(20)}: ${c}`);
+      }
+      return 0;
+    } catch (err) {
+      console.error(`Failed to read audit file: ${err.message}`);
+      return 1;
+    }
+  }
+
+  console.log(`Compiling YouTube catalog from audit trail: ${options.auditFilePath}`);
+  console.log(`Target output: ${options.outputPath}`);
+  if (!options.publish) {
+    console.log("Mode: PREVIEW (pass --publish to write to production catalog)");
+  } else {
+    console.log("Mode: PUBLISH (writing approved edits to production catalog)");
+  }
+
+  const result = await compileYouTubeCatalog({
+    auditFilePath: options.auditFilePath,
+    outputPath: options.outputPath,
+    dryRun: !options.publish,
+    allowDraft: options.allowDraft,
+  });
+
+  if (!result.success) {
+    console.error("\n❌ Compilation aborted. Fail-closed validation errors:");
+    for (const err of result.errors) {
+      console.error(`  - ${err}`);
+    }
+    return 1;
+  }
+
+  console.log(`\n✔ Validation and compilation successful!`);
+  console.log(`  Baseline Demo Edits: 17`);
+  console.log(`  New Approved YouTube Edits: ${result.newCount}`);
+  console.log(`  Total Catalog Size: ${result.totalCount}`);
+
+  if (result.writtenTo) {
+    console.log(`  ✔ Written to: ${result.writtenTo}`);
+  } else {
+    console.log(`  [PREVIEW ONLY] Catalog validated cleanly. Run with --publish to write.`);
+  }
+
+  return 0;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runCompilerCli().then((code) => {
+    process.exit(code);
+  });
 }

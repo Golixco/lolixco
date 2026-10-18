@@ -10,7 +10,7 @@ import {
   skipUnavailableImmersionEdit,
 } from "../../utils/immersionQueue";
 import { playbackCoordinator } from "../../utils/playbackCoordinator";
-import YouTubePlayer from "../video/YouTubePlayer";
+import YouTubePlayer, { type YouTubePlayerHandle } from "../video/YouTubePlayer";
 import {
   X,
   Play,
@@ -37,6 +37,7 @@ export default function ImmersionViewer({
 }: ImmersionViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const nativeVideoRef = useRef<HTMLVideoElement>(null);
+  const ytPlayerRef = useRef<YouTubePlayerHandle>(null);
 
   const [session, setSession] = useState<{
     currentEdit: Edit | null;
@@ -58,6 +59,13 @@ export default function ImmersionViewer({
       setIsPlaying(false);
       if (nativeVideoRef.current && !nativeVideoRef.current.paused) {
         nativeVideoRef.current.pause();
+      }
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.pauseVideo();
+        } catch {
+          // Guard against unmounted players
+        }
       }
     });
 
@@ -101,6 +109,13 @@ export default function ImmersionViewer({
         if (nativeVideoRef.current && !nativeVideoRef.current.paused) {
           nativeVideoRef.current.pause();
         }
+        if (ytPlayerRef.current) {
+          try {
+            ytPlayerRef.current.pauseVideo();
+          } catch {
+            // Guard against unmounted players
+          }
+        }
       }
     }
 
@@ -138,11 +153,25 @@ export default function ImmersionViewer({
       setIsPlaying(false);
       playbackCoordinator.notifyPaused("immersion-player");
       if (nativeVideoRef.current) nativeVideoRef.current.pause();
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.pauseVideo();
+        } catch {
+          // Ignore
+        }
+      }
     } else {
       playbackCoordinator.notifyPlaying("immersion-player");
       setIsPlaying(true);
       setAutoplayBlocked(false);
       if (nativeVideoRef.current) nativeVideoRef.current.play().catch(() => {});
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.playVideo();
+        } catch {
+          setAutoplayBlocked(true);
+        }
+      }
     }
   }, [isPlaying]);
 
@@ -311,11 +340,13 @@ export default function ImmersionViewer({
           >
             {isEmbed ? (
               <YouTubePlayer
+                ref={ytPlayerRef}
                 key={currentEdit.id}
                 videoId={currentEdit.youtubeVideoId || ""}
                 title={currentEdit.title}
                 aspectRatio={isPortrait ? "9:16" : "16:9"}
                 autoPlay={isPlaying}
+                coordinatorId="immersion-player"
                 onEnded={handleNext}
                 onError={() => handlePlaybackError()}
                 onPlay={() => {

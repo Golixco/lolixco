@@ -8,21 +8,34 @@
  * - Duplicate detection within batch and across audit history (idempotency)
  * - Metadata retrieval with quota protection and offline mock support
  * - Editorial classification and conflict detection
- * - Persistent audit trail storage
+ * - Preservation of approved review decisions across re-imports
+ * - Preservation of owner category and fandom assignments
+ * - Persistent audit trail storage at canonical path
+ * - Executable CLI entrypoint with exit codes
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { register } from "node:module";
+
+export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
+
+// Register TypeScript loader for on-the-fly TS transpilation
+try {
+  register("./tests/ts-hooks.mjs", new URL("../", import.meta.url));
+} catch {
+  // If already registered or unavailable, proceed
+}
 
 import { normalizeYouTubeUrl } from "./youtube-normalizer.mjs";
-import { fetchYouTubeVideoMetadata } from "./youtube-api.mjs";
+import { fetchYouTubeVideoMetadata, loadEnvConfig } from "./youtube-api.mjs";
 import {
   evaluateEditorialClassification,
   CANONICAL_CATEGORIES,
 } from "./youtube-editorial.mjs";
 
-export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
+export const CANONICAL_AUDIT_PATH = resolve(projectRoot, "content/audit/youtube-intake-audit.json");
 
 /**
  * Loads registered fandoms from src/data/fandoms.ts dynamically.
@@ -50,7 +63,6 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
   let items = [];
 
   if (typeof input === "string") {
-    // Could be raw text or JSON string
     const trimmed = input.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
@@ -67,35 +79,49 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
       url,
       category: defaultCategory,
       fandom: defaultFandom,
+      fandomIds: defaultFandom ? [defaultFandom] : [],
     }));
   } else if (Array.isArray(input)) {
     items = input.map((item) => {
       if (typeof item === "string") {
-        return { url: item, category: defaultCategory, fandom: defaultFandom };
+        return {
+          url: item,
+          category: defaultCategory,
+          fandom: defaultFandom,
+          fandomIds: defaultFandom ? [defaultFandom] : [],
+        };
       }
       return {
         url: item.url,
         category: item.category || defaultCategory,
         fandom: item.fandom || defaultFandom,
-        fandomIds: item.fandomIds || [],
+        fandomIds: Array.isArray(item.fandomIds)
+          ? item.fandomIds
+          : (item.fandom ? [item.fandom] : (defaultFandom ? [defaultFandom] : [])),
       };
     });
   } else if (typeof input === "object" && input !== null) {
     const batchCat = input.category || defaultCategory;
     const batchFan = input.fandom || defaultFandom;
+    const batchFandomIds = Array.isArray(input.fandomIds)
+      ? input.fandomIds
+      : (batchFan ? [batchFan] : []);
 
     if (Array.isArray(input.urls)) {
       items = input.urls.map((url) => ({
         url,
         category: batchCat,
         fandom: batchFan,
+        fandomIds: batchFandomIds,
       }));
     } else if (Array.isArray(input.items)) {
       items = input.items.map((item) => ({
         url: item.url,
         category: item.category || batchCat,
         fandom: item.fandom || batchFan,
-        fandomIds: item.fandomIds || [],
+        fandomIds: Array.isArray(item.fandomIds)
+          ? item.fandomIds
+          : (item.fandom ? [item.fandom] : batchFandomIds),
       }));
     }
   }
@@ -110,15 +136,17 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
  * @returns {Promise<object>} Ingestion report
  */
 export async function ingestYouTubeBatch(options = {}) {
+  loadEnvConfig();
+
   const {
     batchId = `batch-${Date.now()}`,
     batchInput,
     batchPath,
     category = "",
     fandom = "",
-    auditFilePath = resolve(projectRoot, "content/youtube-audit.json"),
+    auditFilePath = CANONICAL_AUDIT_PATH,
     dryRun = false,
-    mockMode = !process.env.YOUTUBE_API_KEY,
+    mockMode = false,
   } = options;
 
   const errors = [];
@@ -201,7 +229,7 @@ export async function ingestYouTubeBatch(options = {}) {
     if (existingByVideoId.has(norm.videoId)) {
       const existing = existingByVideoId.get(norm.videoId);
       warnings.push(
-        `Item #${idx + 1} duplicate: Video ID '${norm.videoId}' was already imported in batch '${existing.batchId}' (status: ${existing.contentReviewStatus}). Updating classification if approved.`
+        `Item #${idx + 1} duplicate: Video ID '${norm.videoId}' was already imported in batch '${existing.batchId}' (status: ${existing.contentReviewStatus}). Updating metadata & preserving review decision.`
       );
     }
 
@@ -212,7 +240,7 @@ export async function ingestYouTubeBatch(options = {}) {
       urlFormatHint: norm.urlFormatHint,
       category: raw.category || category,
       fandom: raw.fandom || fandom,
-      fandomIds: raw.fandomIds || [],
+      fandomIds: raw.fandomIds || (raw.fandom ? [raw.fandom] : (fandom ? [fandom] : [])),
     });
 
     validVideoIdsToFetch.push(norm.videoId);
@@ -227,12 +255,40 @@ export async function ingestYouTubeBatch(options = {}) {
     };
   }
 
-  // 5. Fetch Metadata via YouTube API (or mock)
-  const metadataResult = await fetchYouTubeVideoMetadata(validVideoIdsToFetch, {
-    mockMode,
-  });
+  // 5. Fetch Metadata via YouTube API (or injected mock client / fetchMetadata)
+  let metadataResult;
+  if (typeof options.fetchMetadata === "function") {
+    metadataResult = await options.fetchMetadata(validVideoIdsToFetch);
+  } else if (options.apiClient?.fetchMetadata) {
+    const fetchedItems = [];
+    const missing = [];
+    const fetchErrors = [];
+    for (const vid of validVideoIdsToFetch) {
+      const res = await options.apiClient.fetchMetadata(vid);
+      if (res && res.success && res.metadata) {
+        fetchedItems.push(res.metadata);
+      } else {
+        missing.push(vid);
+        if (res?.errors) fetchErrors.push(...res.errors);
+      }
+    }
+    metadataResult = { items: fetchedItems, missingIds: missing, errors: fetchErrors };
+  } else {
+    metadataResult = await fetchYouTubeVideoMetadata(validVideoIdsToFetch, {
+      mockMode,
+    });
+  }
 
   if (metadataResult.errors.length > 0) {
+    if (metadataResult.items.length === 0) {
+      // Entire batch failed (e.g. missing API key, network failure, quota exceeded)
+      return {
+        success: false,
+        errors: metadataResult.errors,
+        warnings,
+        processed: [],
+      };
+    }
     warnings.push(...metadataResult.errors);
   }
 
@@ -245,6 +301,7 @@ export async function ingestYouTubeBatch(options = {}) {
   for (const entry of normalizedBatch) {
     const videoId = entry.canonicalVideoId;
     const metadata = metadataMap.get(videoId);
+    const existing = existingByVideoId.get(videoId);
 
     let classification;
     if (metadata) {
@@ -269,6 +326,72 @@ export async function ingestYouTubeBatch(options = {}) {
       };
     }
 
+    // Preserve editorial review decision across re-imports (FIX C)
+    let finalReviewStatus = classification.reviewStatus;
+    const auditHistory = Array.isArray(existing?.auditHistory) ? [...existing.auditHistory] : [];
+
+    if (existing) {
+      if (existing.contentReviewStatus === "approved") {
+        if (!metadata || missingIdSet.has(videoId)) {
+          finalReviewStatus = "unavailable";
+          classification.warnings.push("Previously approved item is now unavailable or removed on YouTube.");
+          auditHistory.push({
+            date: new Date().toISOString(),
+            event: "status_transition",
+            from: "approved",
+            to: "unavailable",
+            reason: "video_unavailable_or_removed",
+          });
+        } else if (metadata.embeddable === false) {
+          finalReviewStatus = "embed_restricted";
+          classification.warnings.push("Previously approved item embedding has been restricted.");
+          auditHistory.push({
+            date: new Date().toISOString(),
+            event: "status_transition",
+            from: "approved",
+            to: "embed_restricted",
+            reason: "embedding_disabled",
+          });
+        } else if (metadata.privacyStatus && metadata.privacyStatus !== "public") {
+          finalReviewStatus = "unavailable";
+          classification.warnings.push(`Previously approved item privacyStatus changed to '${metadata.privacyStatus}'.`);
+          auditHistory.push({
+            date: new Date().toISOString(),
+            event: "status_transition",
+            from: "approved",
+            to: "unavailable",
+            reason: `privacy_status_${metadata.privacyStatus}`,
+          });
+        } else if (
+          existing.metadata &&
+          (existing.metadata.title !== metadata.title ||
+            Math.abs((existing.metadata.durationSec || 0) - (metadata.durationSec || 0)) > 5)
+        ) {
+          finalReviewStatus = "needs_recheck";
+          classification.warnings.push("Material changes detected in video metadata since approval. Transitioned to needs_recheck.");
+          auditHistory.push({
+            date: new Date().toISOString(),
+            event: "status_transition",
+            from: "approved",
+            to: "needs_recheck",
+            reason: "material_metadata_change",
+          });
+        } else {
+          // Metadata is valid and unchanged: preserve approved status!
+          finalReviewStatus = "approved";
+          auditHistory.push({
+            date: new Date().toISOString(),
+            event: "reimport_verification",
+            status: "approved",
+            note: "Metadata verified unchanged",
+          });
+        }
+      } else if (existing.contentReviewStatus === "rejected") {
+        // Never automatically re-approve a rejected item
+        finalReviewStatus = "rejected";
+      }
+    }
+
     const auditRecord = {
       batchId,
       submittedUrl: entry.submittedUrl,
@@ -277,16 +400,21 @@ export async function ingestYouTubeBatch(options = {}) {
       ownerCategory: entry.category,
       ownerFandom: entry.fandom,
       ownerFandomIds: entry.fandomIds,
+      category: classification.category || entry.category,
+      fandomIds: classification.fandomIds,
       suggestedCategories: classification.suggestedCategories || [],
       suggestedFandomIds: classification.suggestedFandomIds || [],
       conflictFlag: classification.conflictFlag,
       format: classification.format,
       metadataFetchStatus: metadata ? "fetched" : "failed",
-      contentReviewStatus: classification.reviewStatus,
+      contentReviewStatus: finalReviewStatus,
       validationWarnings: classification.warnings,
       lastMetadataVerification: new Date().toISOString(),
       metadata: metadata || null,
-      assignedLolixcoId: existingByVideoId.get(videoId)?.assignedLolixcoId || null,
+      isMock: metadata?.isMock === true,
+      provenance: metadata?.provenance || "unfetched",
+      assignedLolixcoId: existing?.assignedLolixcoId || null,
+      auditHistory,
     };
 
     processedRecords.push(auditRecord);
@@ -297,6 +425,10 @@ export async function ingestYouTubeBatch(options = {}) {
 
   // 7. Save Audit Trail (unless dryRun)
   if (!dryRun) {
+    const dir = dirname(auditFilePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
     auditData.items = Array.from(existingByVideoId.values());
     auditData.lastUpdated = new Date().toISOString();
     writeFileSync(auditFilePath, JSON.stringify(auditData, null, 2), "utf-8");
@@ -311,4 +443,115 @@ export async function ingestYouTubeBatch(options = {}) {
     dryRun,
     auditFilePath,
   };
+}
+
+/**
+ * CLI Runner with explicit argument parsing, error handling, and exit codes.
+ */
+export async function runImporterCli(args = process.argv.slice(2)) {
+  loadEnvConfig();
+
+  const options = {
+    batchId: `batch-${Date.now()}`,
+    category: "",
+    fandom: "",
+    batchPath: "",
+    urls: [],
+    dryRun: false,
+    mockMode: false,
+    auditFilePath: CANONICAL_AUDIT_PATH,
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--help" || arg === "-h") {
+      console.log(`
+Lolixco YouTube Importer CLI
+
+Usage:
+  node scripts/youtube-importer.mjs [options]
+
+Options:
+  --batch <id>          Batch identifier (e.g. 01, batch-01)
+  --category <name>     Category (Anime, Gaming, Movies, Series, Phonk, Multifandom)
+  --fandom <slug>       Fandom slug (e.g. valorant, jujutsu-kaisen)
+  --input <file>        Input file (.txt with 1 URL per line or .json)
+  --urls <u1,u2>        Comma-separated list of YouTube URLs
+  --dry-run             Simulate import without writing to audit file
+  --mock                Enable offline mock mode for testing
+  --audit-file <path>   Audit file path (default: content/audit/youtube-intake-audit.json)
+  -h, --help            Show this help message
+`);
+      return 0;
+    } else if (arg === "--batch" && args[i + 1]) {
+      options.batchId = args[++i];
+    } else if (arg === "--category" && args[i + 1]) {
+      options.category = args[++i];
+    } else if (arg === "--fandom" && args[i + 1]) {
+      options.fandom = args[++i];
+    } else if (arg === "--input" && args[i + 1]) {
+      options.batchPath = args[++i];
+    } else if (arg === "--urls" && args[i + 1]) {
+      options.urls = args[++i].split(",").map((u) => u.trim()).filter(Boolean);
+    } else if (arg === "--dry-run") {
+      options.dryRun = true;
+    } else if (arg === "--mock") {
+      options.mockMode = true;
+    } else if (arg === "--audit-file" && args[i + 1]) {
+      options.auditFilePath = resolve(args[++i]);
+    }
+  }
+
+  if (!options.batchPath && options.urls.length === 0) {
+    console.error("Error: Must specify --input <file> or --urls <url1,url2,...>");
+    return 1;
+  }
+
+  const batchInput = options.urls.length > 0 ? options.urls : undefined;
+
+  console.log(`Starting YouTube batch import [${options.batchId}]...`);
+  if (options.dryRun) console.log("Mode: DRY-RUN (no files will be written)");
+  if (options.mockMode) console.log("Mode: MOCK (synthetic offline test mode)");
+
+  const result = await ingestYouTubeBatch({
+    batchId: options.batchId,
+    category: options.category,
+    fandom: options.fandom,
+    batchPath: options.batchPath || undefined,
+    batchInput,
+    dryRun: options.dryRun,
+    mockMode: options.mockMode,
+    auditFilePath: options.auditFilePath,
+  });
+
+  if (!result.success) {
+    console.error("\n❌ Import failed with errors:");
+    for (const err of result.errors) {
+      console.error(`  - ${err}`);
+    }
+    if (result.warnings.length > 0) {
+      console.warn("\nWarnings:");
+      for (const w of result.warnings) {
+        console.warn(`  - ${w}`);
+      }
+    }
+    return 1;
+  }
+
+  console.log(`\n✔ Ingestion successful!`);
+  console.log(`  Processed: ${result.processedCount} items`);
+  console.log(`  Audit file: ${result.auditFilePath}`);
+  if (result.warnings.length > 0) {
+    console.log(`  Warnings (${result.warnings.length}):`);
+    for (const w of result.warnings) {
+      console.log(`    - ${w}`);
+    }
+  }
+  return 0;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runImporterCli().then((code) => {
+    process.exit(code);
+  });
 }

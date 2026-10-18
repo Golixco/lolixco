@@ -167,3 +167,7 @@ content/*.private.json
 content/staging/
 public/media/staging/
 
+# Private YouTube audit trail and intake logs (FIX F)
+content/audit/
+content/youtube-audit.json
+

@@ -164,7 +164,11 @@ export default function VideoPlayer({
               <button
                 type="button"
                 className="shuffle-moment-btn"
-                onClick={onShuffle}
+                style={{ pointerEvents: "auto", position: "relative", zIndex: 10, cursor: "pointer" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onShuffle();
+                }}
                 title="Shuffle Edit of the Moment"
                 aria-label="Shuffle Edit of the Moment"
               >
@@ -275,7 +279,11 @@ export default function VideoPlayer({
             <button
               type="button"
               className="shuffle-moment-btn"
-              onClick={onShuffle}
+              style={{ pointerEvents: "auto", position: "relative", zIndex: 10, cursor: "pointer" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onShuffle();
+              }}
               title="Shuffle Edit of the Moment"
               aria-label="Shuffle Edit of the Moment"
             >

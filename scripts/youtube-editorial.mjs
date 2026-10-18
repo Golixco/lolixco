@@ -140,15 +140,29 @@ export function evaluateEditorialClassification(options) {
     }
   }
 
-  // 4. Format determination
-  // A YouTube /shorts/ URL is a hint, but duration <= 60s is necessary.
+  // 4. Format determination (YouTube Shorts support up to 3 minutes / 180 seconds)
   let determinedFormat = "unknown";
   const durationSec = metadata.durationSec ?? 0;
+  const isConfirmedShort = options.confirmedFormat === "short" || options.ownerFormat === "short";
+  const isConfirmedVideo = options.confirmedFormat === "video" || options.ownerFormat === "video";
 
-  if (durationSec > 60) {
-    determinedFormat = "video"; // Videos longer than 60s cannot be Shorts
-  } else if (urlFormatHint === "short" && durationSec <= 60 && durationSec > 0) {
+  if (isConfirmedVideo) {
+    determinedFormat = "video";
+  } else if (isConfirmedShort) {
+    if (durationSec > 180) {
+      determinedFormat = "video";
+      warnings.push(`Specified format was 'short', but duration (${durationSec}s) exceeds the maximum YouTube Shorts limit of 180s (3 minutes). Classified as landscape video.`);
+    } else {
+      determinedFormat = "short";
+    }
+  } else if (durationSec > 180) {
+    determinedFormat = "video";
+    if (urlFormatHint === "short") {
+      warnings.push(`URL hint was 'short', but duration (${durationSec}s) exceeds the maximum YouTube Shorts limit of 180s (3 minutes). Classified as landscape video.`);
+    }
+  } else if (urlFormatHint === "short" && durationSec <= 180 && durationSec > 0) {
     determinedFormat = "short";
+    warnings.push(`Format candidate is 'short' based on URL hint and duration (${durationSec}s <= 180s), but portrait aspect ratio requires explicit editorial confirmation before publication.`);
   } else if (urlFormatHint === "video") {
     determinedFormat = "video";
   }
@@ -162,6 +176,11 @@ export function evaluateEditorialClassification(options) {
   } else if (metadata.privacyStatus && metadata.privacyStatus !== "public") {
     reviewStatus = "unavailable";
   } else if (warnings.some((w) => w.startsWith("Non-canonical") || w.startsWith("Missing owner"))) {
+    reviewStatus = "needs_review";
+  } else if (determinedFormat === "unknown") {
+    reviewStatus = "needs_review";
+  } else if (determinedFormat === "short" && !isConfirmedShort) {
+    // Retain needs_review if portrait dimensions remain unconfirmed
     reviewStatus = "needs_review";
   } else if (metadata.embeddable === true) {
     reviewStatus = "embed_eligible";

@@ -84,15 +84,29 @@ node scripts/youtube-importer.mjs \
 [6. Full Quality Verification Suite]
 ```
 
-### Step 5: Compile Approved Items into Catalog
-Once items in the audit log have status `approved`:
+### Step 5: Review & Compile Approved Items into Catalog
+
+To inspect the status breakdown of the intake audit log:
+```bash
+node scripts/compile-youtube-catalog.mjs --review
+```
+
+To validate and preview catalog generation without modifying production files:
 ```bash
 node scripts/compile-youtube-catalog.mjs
+# or explicitly: node scripts/compile-youtube-catalog.mjs --preview
 ```
+
+To publish approved items to the live production catalog (`src/data/edits.ts`):
+```bash
+node scripts/compile-youtube-catalog.mjs --publish
+```
+
 This updates `src/data/edits.ts` deterministically:
-- IDs 0–16: Baseline original demo edits (preserved).
+- IDs 0–16: Baseline original demo edits (strictly preserved).
 - IDs 100–199: Curated landscape YouTube edits.
 - IDs 200–299: Curated portrait YouTube Shorts.
+- Fail-closed validation against mocks, private/unembeddable videos, duplicate IDs, unregistered fandoms, and incomplete metadata.
 - All internal audit notes and secrets are completely stripped.
 
 ### Step 6: Verify Catalog & System Integrity
@@ -110,5 +124,5 @@ npm run build
 
 If a batch needs to be revoked or re-processed:
 1. Revert `content/audit/youtube-intake-audit.json` to the previous git commit.
-2. Re-run `node scripts/compile-youtube-catalog.mjs`.
+2. Re-run `node scripts/compile-youtube-catalog.mjs --publish`.
 3. Verify that the production catalog cleanly returns to the expected state.

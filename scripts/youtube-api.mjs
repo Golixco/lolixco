@@ -1,10 +1,64 @@
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __projectRoot = fileURLToPath(new URL("../", import.meta.url));
+
 /**
- * YouTube Data API v3 Client and Mock Service for Lolixco.
- *
- * Implements batched video metadata retrieval (up to 50 items per call),
- * thumbnail resolution selection, ISO 8601 duration conversion, hashtag extraction,
- * embeddability verification, quota protection, and offline mock support.
+ * Loads .env and .env.local if present in project root.
  */
+export function loadEnvConfig(rootDir = __projectRoot) {
+  // Try Node.js built-in process.loadEnvFile first
+  if (typeof process.loadEnvFile === "function") {
+    const envPath = resolve(rootDir, ".env");
+    if (existsSync(envPath)) {
+      try {
+        process.loadEnvFile(envPath);
+      } catch {
+        // Fallback below
+      }
+    }
+    const envLocalPath = resolve(rootDir, ".env.local");
+    if (existsSync(envLocalPath)) {
+      try {
+        process.loadEnvFile(envLocalPath);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  // Fallback manual parser to ensure .env loading across platforms
+  const targetFiles = [".env", ".env.local"];
+  for (const file of targetFiles) {
+    const fullPath = resolve(rootDir, file);
+    if (existsSync(fullPath)) {
+      try {
+        const content = readFileSync(fullPath, "utf-8");
+        for (const line of content.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const eqIdx = trimmed.indexOf("=");
+          if (eqIdx !== -1) {
+            const key = trimmed.slice(0, eqIdx).trim();
+            let val = trimmed.slice(eqIdx + 1).trim();
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+              val = val.slice(1, -1);
+            }
+            if (key && !(key in process.env)) {
+              process.env[key] = val;
+            }
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+  }
+}
+
+// Auto-load on import
+loadEnvConfig();
 
 /**
  * Parses ISO 8601 duration (e.g., "PT30S", "PT1M15S", "PT1H2M3S") into seconds and formatted string.
@@ -108,9 +162,11 @@ export function clearMockVideos() {
  * @returns {Promise<{ items: object[]; missingIds: string[]; errors: string[] }>}
  */
 export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
+  loadEnvConfig();
+
   const {
     apiKey = process.env.YOUTUBE_API_KEY,
-    mockMode = !apiKey,
+    mockMode = false,
     timeoutMs = 10000,
     maxRetries = 2,
   } = options;
@@ -128,7 +184,18 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   // Limit to 50 items per request
   const batch = uniqueIds.slice(0, 50);
 
-  // MOCK MODE (For automated tests and CI environments)
+  // FAIL CLOSED: Require a real API key for normal ingestion
+  if (!mockMode && (!apiKey || typeof apiKey !== "string" || !apiKey.trim())) {
+    return {
+      items: [],
+      missingIds: batch,
+      errors: [
+        "YouTube API key is missing. Set YOUTUBE_API_KEY in .env or pass --mock for offline testing.",
+      ],
+    };
+  }
+
+  // MOCK MODE (For automated tests only via explicit switch or injected mock database)
   if (mockMode) {
     const items = [];
     const missingIds = [];
@@ -140,7 +207,11 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
           // Explicitly simulated 404/deleted
           missingIds.push(id);
         } else {
-          items.push(mock);
+          items.push({
+            ...mock,
+            isMock: true,
+            provenance: "synthetic_mock",
+          });
         }
       } else {
         // Default deterministic synthetic response for testing
@@ -161,6 +232,8 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
           embeddable: true,
           privacyStatus: "public",
           regionRestriction: null,
+          isMock: true,
+          provenance: "synthetic_mock",
         });
       }
     }
@@ -237,12 +310,21 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
         const tags = Array.isArray(snippet.tags) ? snippet.tags.map((t) => t.toLowerCase()) : [];
         const hashtags = extractHashtags(description);
 
+        const rawTitle = typeof snippet.title === "string" ? snippet.title.trim() : "";
+        const rawChannelTitle = typeof snippet.channelTitle === "string" ? snippet.channelTitle.trim() : "";
+
+        // Reject incomplete records without fabricating titles or creator attribution
+        if (!rawTitle) {
+          missingIds.push(id);
+          continue;
+        }
+
         mappedItems.push({
           canonicalVideoId: id,
-          title: snippet.title || `YouTube Video ${id}`,
+          title: rawTitle,
           description,
           channelId: snippet.channelId || "",
-          channelTitle: snippet.channelTitle || "Unknown Creator",
+          channelTitle: rawChannelTitle,
           publishedAt: snippet.publishedAt || "",
           tags,
           hashtags,
@@ -253,6 +335,8 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
           embeddable: status.embeddable === true,
           privacyStatus: status.privacyStatus || "unknown",
           regionRestriction: contentDetails.regionRestriction || null,
+          isMock: false,
+          provenance: "youtube_data_api_v3",
         });
       }
 
