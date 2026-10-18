@@ -96,18 +96,30 @@ Optional technical specifications used for media validation and player performan
 
 ## 4. Safe Public Client Projection
 
-When compiling or generating the live catalog [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts), the validation utility function [`projectToPublicEdit`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs) projects the manifest record into the clean public `Edit` model:
+When compiling or generating the live catalog [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts), the validation utility function [`projectToPublicEdit`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs) projects the manifest record into the clean public `Edit` model.
+
+**Safe by default:** To prevent unapproved or uncleared records from accidentally leaking into public client bundles, `projectToPublicEdit` enforces strict publication clearance by default (`allowDraft: false`). Developers never need to remember an optional safety flag. For development previews and internal staging, the explicitly named [`projectToPreviewEdit`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs) function is provided.
 
 ```typescript
-export function projectToPublicEdit(item: ContentRecord, { strict = false } = {}): Edit {
-  if (strict) {
+/**
+ * Strip private editorial metadata for public client projection.
+ * SAFE BY DEFAULT: Enforces approved review and cleared rights unless allowDraft: true is passed.
+ */
+export function projectToPublicEdit(item: ContentRecord, { allowDraft = false, strict = true } = {}): Edit {
+  const isEnforcingClearance = !allowDraft && strict !== false;
+
+  if (isEnforcingClearance) {
     const reviewStatus = item.editorial?.reviewStatus;
     const rightsCleared = item.editorial?.rightsCleared;
     if (reviewStatus !== "approved" && reviewStatus !== "published") {
-      throw new Error(`Cannot project item ${item.id} to public catalog: editorial reviewStatus must be 'approved' or 'published', got '${reviewStatus}'`);
+      throw new Error(
+        `Cannot project item ${item.id} to public catalog: editorial reviewStatus must be 'approved' or 'published', got '${reviewStatus}'`
+      );
     }
     if (rightsCleared !== true) {
-      throw new Error(`Cannot project item ${item.id} to public catalog: editorial rightsCleared must be true`);
+      throw new Error(
+        `Cannot project item ${item.id} to public catalog: editorial rightsCleared must be true`
+      );
     }
   }
 
@@ -126,10 +138,19 @@ export function projectToPublicEdit(item: ContentRecord, { strict = false } = {}
     ...(item.fandomIds?.length ? { fandomIds: [...item.fandomIds] } : {}),
   };
 }
+
+/**
+ * Non-public preview projection function.
+ * Explicitly allows draft and unreviewed items for development preview only.
+ */
+export function projectToPreviewEdit(item: ContentRecord): Edit {
+  return projectToPublicEdit(item, { allowDraft: true, strict: false });
+}
 ```
 
 This guarantees:
-1. **Compilation Guard:** Unapproved or uncleared records cannot be compiled into production bundles when `strict: true`.
-2. **Zero Leakage:** Private review statuses, rights notes, and internal curator remarks are stripped.
-3. **Anonymized Attribution:** Creator personal details are completely excluded from public search indexes and cards.
-4. **Backward Compatibility:** Full alignment with the existing TypeScript `Edit` interface and feed compositor.
+1. **Safe by Default:** Unapproved or uncleared draft records cannot be compiled into public catalogs by calling `projectToPublicEdit(item)` without arguments.
+2. **Dedicated Preview Path:** Staging tools and local preview harnesses must call `projectToPreviewEdit(item)` deliberately.
+3. **Zero Leakage:** Private review statuses, rights notes, and internal curator remarks are stripped.
+4. **Anonymized Attribution:** Creator personal details are completely excluded from public search indexes and cards.
+5. **Backward Compatibility:** Full alignment with the existing TypeScript `Edit` interface and feed compositor.

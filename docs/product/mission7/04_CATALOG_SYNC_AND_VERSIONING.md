@@ -47,13 +47,15 @@ To protect production stability and prevent corrupted metadata or partial upload
 ```
 
 1. **Tier 1 — Metadata Preparation Mode (`--mode metadata`):**
-   Editors author `content/manifest.json` before media files arrive. Validates schema, data types, string constraints, and ID range compliance. Asset verification is marked as `SKIPPED`.
+   Editors author `content/manifest.json` before media files arrive. Validates schema, data types, string constraints, and ID range compliance. Asset verification and stream inspection are marked as `SKIPPED`. Runs 100% offline without requiring media files or ffprobe.
 2. **Tier 2 — Asset Verification Mode (`--mode assets`):**
-   Requires staged media files to exist in `public/media/`. Checks magic bytes via streaming header reads (max 64KB) and verifies safe path containment.
+   Requires staged media files to exist in `public/media/`. Checks magic bytes via streaming header reads (max 64KB) and verifies safe path containment (`realpathSync`). Stream inspection is reported separately as `INCOMPLETE` if ffprobe is unavailable, without claiming publication readiness.
 3. **Tier 3 — Publication Readiness Mode (`--mode publish`):**
-   Requires approved review (`reviewStatus: "approved" | "published"`), documented rights clearance (`rightsCleared: true`), and verified assets.
+   Requires approved review (`reviewStatus: "approved" | "published"`), documented rights clearance (`rightsCleared: true`), verified staged assets, and certified decodable media streams. Fails closed with fatal errors if ffprobe is unavailable, if streams cannot be decoded, or if dimensions/codecs/tolerances mismatch declared metadata.
 4. **Tier 4 — Controlled Production Compilation:**
-   Once publication-ready, records are projected into [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts) via `projectToPublicEdit({ strict: true })`.
+   Once publication-ready, records are projected into [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts) via `projectToPublicEdit(item)`. Safe by default: throws immediately if unapproved or uncleared records are passed. Non-public staging workflows must explicitly call `projectToPreviewEdit(item)`.
+
+*Strict Mode Validation:* Only `metadata`, `assets`, and `publish` modes are accepted. Any unknown or unsupported mode is rejected immediately with a structured error and a non-zero exit code.
 
 ---
 

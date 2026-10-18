@@ -1,4 +1,13 @@
-import { statSync, openSync, readSync, closeSync, existsSync, readFileSync } from "node:fs";
+import {
+  statSync,
+  openSync,
+  readSync,
+  closeSync,
+  existsSync,
+  readFileSync,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
 import { resolve, relative, extname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
@@ -12,6 +21,8 @@ try {
 } catch {
   // If already registered or unavailable, proceed
 }
+
+export const VALID_MODES = ["metadata", "assets", "publish"];
 
 export const PRIMARY_CATEGORIES = [
   "Anime",
@@ -30,6 +41,8 @@ export const DURATION_REGEX = /^[0-9]+:[0-5][0-9]$/;
 export const FANDOM_SLUG_REGEX = /^[a-z0-9_-]+$/;
 export const POSTER_PATH_REGEX = /^(\/|https?:\/\/|\.\/).+\.(svg|png|jpg|jpeg|webp)$/;
 export const VIDEO_PATH_REGEX = /^(\/|https?:\/\/|\.\/).+\.(mp4|webm|m4v)$/;
+export const RFC3339_DATE_TIME_REGEX =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$/;
 
 export const ALLOWED_ROOT_KEYS = [
   "$schema",
@@ -93,6 +106,149 @@ export const ALLOWED_AUDIO_CODECS = ["aac", "opus", "mp3", "none"];
 export const ALLOWED_ASPECT_RATIOS = ["16:9", "9:16", "4:3", "2.39:1"];
 export const ALLOWED_REVIEW_STATUSES = ["draft", "reviewed", "approved", "rejected", "published"];
 
+const schemaPath = resolve(projectRoot, "content/manifest.schema.json");
+export const manifestSchema = JSON.parse(readFileSync(schemaPath, "utf-8"));
+export const contentRecordSchema = manifestSchema.definitions.ContentRecord;
+
+/**
+ * Validate RFC 3339 / ISO date-time string.
+ */
+export function isValidDateTime(val) {
+  if (typeof val !== "string") return false;
+  if (!RFC3339_DATE_TIME_REGEX.test(val)) return false;
+  const timestamp = Date.parse(val);
+  return !isNaN(timestamp);
+}
+
+/**
+ * Normalize codec names across formats and containers (e.g. avc1 -> h264).
+ */
+export function normalizeCodec(name) {
+  if (!name) return "";
+  const lower = name.toLowerCase().trim();
+  if (lower === "h264" || lower === "avc1") return "h264";
+  if (lower === "hevc" || lower === "h265" || lower === "hev1" || lower === "hvc1") return "hevc";
+  if (lower === "av1" || lower === "av01") return "av1";
+  if (lower === "vp9") return "vp9";
+  if (lower === "vp8") return "vp8";
+  return lower;
+}
+
+/**
+ * Authoritative JSON Schema validator (Draft-07 compliant for manifest schema).
+ * Returns array of structured validation error strings.
+ */
+export function validateJsonSchema(data, schema, rootSchema = schema, path = "") {
+  const errors = [];
+
+  if (!schema || typeof schema !== "object") return errors;
+
+  if (schema.$ref) {
+    const refKey = schema.$ref.replace("#/definitions/", "");
+    const refSchema = rootSchema.definitions?.[refKey];
+    if (!refSchema) {
+      throw new Error(`Unresolved schema reference: ${schema.$ref}`);
+    }
+    return validateJsonSchema(data, refSchema, rootSchema, path);
+  }
+
+  // Reject explicit nulls for non-null types
+  if (data === null) {
+    errors.push(`Property '${path || "value"}' cannot be null`);
+    return errors;
+  }
+
+  // Type check
+  if (schema.type) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    let matchesType = false;
+    for (const t of types) {
+      if (t === "object" && typeof data === "object" && !Array.isArray(data)) matchesType = true;
+      if (t === "array" && Array.isArray(data)) matchesType = true;
+      if (t === "string" && typeof data === "string") matchesType = true;
+      if (t === "integer" && typeof data === "number" && Number.isInteger(data)) matchesType = true;
+      if (t === "number" && typeof data === "number" && !isNaN(data)) matchesType = true;
+      if (t === "boolean" && typeof data === "boolean") matchesType = true;
+    }
+    if (!matchesType) {
+      const actualType = Array.isArray(data) ? "array" : typeof data;
+      errors.push(`Property '${path || "value"}' must be of type ${types.join(" or ")}, got ${actualType}`);
+      return errors;
+    }
+  }
+
+  // Enum check
+  if (schema.enum && !schema.enum.includes(data)) {
+    errors.push(
+      `Property '${path || "value"}' must be one of allowed values: ${schema.enum.join(", ")}, got ${JSON.stringify(data)}`
+    );
+  }
+
+  // String checks
+  if (typeof data === "string") {
+    if (schema.minLength !== undefined && data.length < schema.minLength) {
+      errors.push(`Property '${path}' length must be at least ${schema.minLength} chars, got ${data.length}`);
+    }
+    if (schema.maxLength !== undefined && data.length > schema.maxLength) {
+      errors.push(`Property '${path}' length must be at most ${schema.maxLength} chars, got ${data.length}`);
+    }
+    if (schema.pattern && !new RegExp(schema.pattern).test(data)) {
+      errors.push(`Property '${path}' must match pattern ${schema.pattern}, got "${data}"`);
+    }
+    if (schema.format === "date-time" && !isValidDateTime(data)) {
+      errors.push(`Property '${path}' must be a valid RFC 3339 / ISO 8601 date-time string, got "${data}"`);
+    }
+  }
+
+  // Number checks
+  if (typeof data === "number") {
+    if (schema.minimum !== undefined && data < schema.minimum) {
+      errors.push(`Property '${path}' must be >= ${schema.minimum}, got ${data}`);
+    }
+    if (schema.maximum !== undefined && data > schema.maximum) {
+      errors.push(`Property '${path}' must be <= ${schema.maximum}, got ${data}`);
+    }
+  }
+
+  // Array checks
+  if (Array.isArray(data)) {
+    if (schema.minItems !== undefined && data.length < schema.minItems) {
+      errors.push(`Property '${path}' must contain at least ${schema.minItems} items, got ${data.length}`);
+    }
+    if (schema.items) {
+      for (let i = 0; i < data.length; i++) {
+        const itemErrors = validateJsonSchema(data[i], schema.items, rootSchema, `${path}[${i}]`);
+        errors.push(...itemErrors);
+      }
+    }
+  }
+
+  // Object checks
+  if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+    if (schema.required) {
+      for (const reqKey of schema.required) {
+        if (!(reqKey in data) || data[reqKey] === undefined) {
+          errors.push(`Missing required property '${reqKey}'${path ? ` in ${path}` : ""}`);
+        }
+      }
+    }
+
+    for (const [key, val] of Object.entries(data)) {
+      const propSchema = schema.properties?.[key];
+      const propPath = path ? `${path}.${key}` : key;
+      if (!propSchema) {
+        if (schema.additionalProperties === false) {
+          errors.push(`Unexpected property '${key}'${path ? ` in ${path}` : ""} (schema forbids additionalProperties)`);
+        }
+      } else if (val !== undefined) {
+        errors.push(...validateJsonSchema(val, propSchema, rootSchema, propPath));
+      }
+    }
+  }
+
+  return errors;
+}
+
 /**
  * Check if ffprobe is installed and executable in PATH.
  */
@@ -110,7 +266,7 @@ export function isFFprobeAvailable() {
  */
 export function inspectVideoWithFFprobe(filePath) {
   if (!isFFprobeAvailable()) {
-    return { available: false, error: "ffprobe not installed" };
+    return { available: false, ok: false, error: "ffprobe is not installed in the execution environment" };
   }
   try {
     const res = spawnSync(
@@ -128,22 +284,54 @@ export function inspectVideoWithFFprobe(filePath) {
       ],
       { encoding: "utf8" }
     );
-    if (res.status !== 0 || !res.stdout) {
-      return { available: true, error: res.stderr || "ffprobe inspection failed" };
+    if (!res || res.status !== 0 || !res.stdout || !res.stdout.trim()) {
+      return {
+        available: true,
+        ok: false,
+        error: `Stream inspection failed (code ${res?.status}): ${res?.stderr?.trim() || "undecodable, missing, or corrupted video stream"}`,
+      };
     }
     const lines = res.stdout.trim().split("\n");
-    const codec = lines[0] || null;
+    const codec = lines[0]?.trim() || null;
     const width = parseInt(lines[1], 10) || null;
     const height = parseInt(lines[2], 10) || null;
-    return { available: true, width, height, codec };
+    const frameRateStr = lines[3]?.trim() || null;
+    const durationSec = parseFloat(lines[4]) || null;
+
+    let frameRate = null;
+    if (frameRateStr) {
+      if (frameRateStr.includes("/")) {
+        const [num, den] = frameRateStr.split("/").map((s) => parseFloat(s.trim()));
+        if (den && !isNaN(num) && !isNaN(den) && den > 0) {
+          frameRate = num / den;
+        }
+      } else {
+        frameRate = parseFloat(frameRateStr) || null;
+      }
+    }
+
+    if (!width || !height || width <= 0 || height <= 0) {
+      return { available: true, ok: false, error: "Failed to decode valid stream dimensions from video" };
+    }
+
+    return {
+      available: true,
+      ok: true,
+      width,
+      height,
+      codec,
+      frameRate,
+      frameRateStr,
+      durationSec,
+    };
   } catch (err) {
-    return { available: true, error: err.message };
+    return { available: true, ok: false, error: `ffprobe execution failed: ${err.message}` };
   }
 }
 
 /**
  * Verify asset file headers and magic bytes without reading entire file into memory.
- * Reads a fixed-size header buffer (up to 4KB).
+ * Reads a fixed-size header buffer (up to 64KB).
  */
 export function verifyAssetBytesStreaming(filePath) {
   if (!existsSync(filePath)) {
@@ -217,6 +405,40 @@ export function verifyAssetBytesStreaming(filePath) {
 }
 
 /**
+ * Verify asset path containment against symlink escapes and directory traversal.
+ */
+export function verifyAssetPathContainment(targetFile, publicDir) {
+  const mediaDir = resolve(publicDir, "media");
+  const brandDir = resolve(publicDir, "brand");
+
+  if (!targetFile.startsWith(mediaDir + sep) && !targetFile.startsWith(brandDir + sep)) {
+    throw new Error(
+      `Unsafe path traversal: "${targetFile}" resolves outside public/media or public/brand directory`
+    );
+  }
+
+  if (!existsSync(targetFile)) {
+    throw new Error(`File not found: ${targetFile}`);
+  }
+
+  // Check if target is a symbolic link escaping permitted directories
+  const realTarget = realpathSync(targetFile);
+  const realMediaDir = existsSync(mediaDir) ? realpathSync(mediaDir) : mediaDir;
+  const realBrandDir = existsSync(brandDir) ? realpathSync(brandDir) : brandDir;
+
+  const inMedia = realTarget.startsWith(realMediaDir + sep);
+  const inBrand = realTarget.startsWith(realBrandDir + sep);
+
+  if (!inMedia && !inBrand) {
+    throw new Error(
+      `Unsafe symlink escape: "${targetFile}" resolves outside public/media or public/brand directory (target: "${realTarget}")`
+    );
+  }
+
+  return realTarget;
+}
+
+/**
  * Validate an individual content record.
  */
 export function validateContentRecord(record, options = {}) {
@@ -226,10 +448,19 @@ export function validateContentRecord(record, options = {}) {
     fandomRegistry = [],
     mode = "metadata", // "metadata" | "assets" | "publish"
     publicDir = resolve(projectRoot, "public"),
+    videoInspector = inspectVideoWithFFprobe,
   } = options;
 
   const errors = [];
   const warnings = [];
+
+  if (!VALID_MODES.includes(mode)) {
+    return {
+      valid: false,
+      errors: [`Invalid validation mode '${mode}'. Allowed modes: ${VALID_MODES.join(", ")}`],
+      warnings: [],
+    };
+  }
 
   // Handle malformed item root types
   if (!record || typeof record !== "object" || Array.isArray(record)) {
@@ -242,7 +473,14 @@ export function validateContentRecord(record, options = {}) {
     };
   }
 
-  const isLiveCatalog = options.isLiveCatalog ?? (!isNewBatch);
+  const isLiveCatalog = options.isLiveCatalog ?? !isNewBatch;
+
+  // Schema Rule: Reject explicit nulls for any defined property
+  for (const [k, v] of Object.entries(record)) {
+    if (v === null) {
+      errors.push(`Property '${k}' cannot be null`);
+    }
+  }
 
   // Schema Rule: Check unexpected properties (additionalProperties: false)
   const allowedKeys = isLiveCatalog ? [...ALLOWED_RECORD_KEYS, "creator"] : ALLOWED_RECORD_KEYS;
@@ -265,7 +503,9 @@ export function validateContentRecord(record, options = {}) {
   // 1. Validate ID
   const id = record.id;
   if (typeof id !== "number" || !Number.isInteger(id) || id < 0) {
-    errors.push(`Invalid ID: ${JSON.stringify(id)} (must be non-negative integer)`);
+    if ("id" in record && record.id !== null) {
+      errors.push(`Invalid ID: ${JSON.stringify(id)} (must be non-negative integer)`);
+    }
   } else {
     if (seenIds.has(id)) {
       errors.push(`Duplicate ID: ${id} is already assigned in this catalog/manifest`);
@@ -299,44 +539,50 @@ export function validateContentRecord(record, options = {}) {
   }
 
   // 2. Validate Format
-  const format = record.format;
-  if (format !== undefined) {
-    if (format !== "video" && format !== "short") {
-      errors.push(`Invalid format: ${JSON.stringify(format)} (must be "video" or "short")`);
+  const format = record.format ?? (isLiveCatalog ? "video" : undefined);
+  if (record.format !== undefined && record.format !== null) {
+    if (record.format !== "video" && record.format !== "short") {
+      errors.push(`Invalid format: ${JSON.stringify(record.format)} (must be "video" or "short")`);
     }
   }
 
   // 3. Validate Title
-  if (typeof record.title !== "string" || !record.title.trim()) {
-    if ("title" in record) errors.push("Title must be a non-empty string");
-  } else if (record.title.trim().length < 3 || record.title.trim().length > 100) {
-    errors.push(
-      `Title length out of bounds: "${record.title.trim()}" (${record.title.trim().length} chars, expected 3-100)`
-    );
+  if (record.title !== undefined && record.title !== null) {
+    if (typeof record.title !== "string" || !record.title.trim()) {
+      errors.push("Title must be a non-empty string");
+    } else if (record.title.trim().length < 3 || record.title.trim().length > 100) {
+      errors.push(
+        `Title length out of bounds: "${record.title.trim()}" (${record.title.trim().length} chars, expected 3-100)`
+      );
+    }
   }
 
   // 4. Validate Description
-  if (typeof record.description !== "string" || !record.description.trim()) {
-    if ("description" in record) errors.push("Description must be a non-empty string");
-  } else if (record.description.trim().length < 5 || record.description.trim().length > 1000) {
-    errors.push(
-      `Description length out of bounds (${record.description.trim().length} chars, expected 5-1000)`
-    );
+  if (record.description !== undefined && record.description !== null) {
+    if (typeof record.description !== "string" || !record.description.trim()) {
+      errors.push("Description must be a non-empty string");
+    } else if (record.description.trim().length < 5 || record.description.trim().length > 1000) {
+      errors.push(
+        `Description length out of bounds (${record.description.trim().length} chars, expected 5-1000)`
+      );
+    }
   }
 
   // 5. Validate Category
-  if (typeof record.category !== "string" || !record.category.trim()) {
-    if ("category" in record) errors.push("Category must be a non-empty string");
-  } else {
-    const trimmedCat = record.category.trim();
-    if (!ALL_CATEGORIES.includes(trimmedCat)) {
-      errors.push(
-        `Invalid category: "${trimmedCat}". Allowed categories: ${ALL_CATEGORIES.join(", ")}`
-      );
-    } else if (isNewBatch && trimmedCat === "Cinematic") {
-      errors.push(
-        `Legacy category "Cinematic" is strictly reserved for demo edits (IDs 0-16). New content must use canonical categories: ${PRIMARY_CATEGORIES.join(", ")}`
-      );
+  if (record.category !== undefined && record.category !== null) {
+    if (typeof record.category !== "string" || !record.category.trim()) {
+      errors.push("Category must be a non-empty string");
+    } else {
+      const trimmedCat = record.category.trim();
+      if (!ALL_CATEGORIES.includes(trimmedCat)) {
+        errors.push(
+          `Invalid category: "${trimmedCat}". Allowed categories: ${ALL_CATEGORIES.join(", ")}`
+        );
+      } else if (isNewBatch && trimmedCat === "Cinematic") {
+        errors.push(
+          `Legacy category "Cinematic" is strictly reserved for demo edits (IDs 0-16). New content must use canonical categories: ${PRIMARY_CATEGORIES.join(", ")}`
+        );
+      }
     }
   }
 
@@ -353,7 +599,9 @@ export function validateContentRecord(record, options = {}) {
         }
         const normalized = fandomId.trim().toLowerCase();
         if (!FANDOM_SLUG_REGEX.test(normalized)) {
-          errors.push(`Fandom slug "${fandomId}" contains invalid characters (allowed: /^[a-z0-9_-]+$/)`);
+          errors.push(
+            `Fandom slug "${fandomId}" contains invalid characters (allowed: /^[a-z0-9_-]+$/)`
+          );
         }
         const fandom = registryMap.get(normalized);
         if (!fandom) {
@@ -375,29 +623,31 @@ export function validateContentRecord(record, options = {}) {
   }
 
   // 7. Validate Tags (Strict lower-case regex match)
-  if (!Array.isArray(record.tags) || record.tags.length === 0) {
-    if ("tags" in record) errors.push("Missing or empty tags array (at least 1 tag required)");
-  } else {
-    for (const tag of record.tags) {
-      if (typeof tag !== "string" || !tag.trim()) {
-        errors.push(`Invalid tag: ${JSON.stringify(tag)}`);
-      } else {
-        const trimmedTag = tag.trim();
-        if (trimmedTag.startsWith("#")) {
-          errors.push(`Tag "${tag}" must not include leading '#' symbol`);
-        }
-        if (!VALID_TAG_REGEX.test(trimmedTag)) {
-          errors.push(
-            `Tag "${tag}" contains invalid characters or uppercase letters (must match /^[a-z0-9_-]+$/)`
-          );
+  if (record.tags !== undefined && record.tags !== null) {
+    if (!Array.isArray(record.tags) || record.tags.length === 0) {
+      errors.push("Missing or empty tags array (at least 1 tag required)");
+    } else {
+      for (const tag of record.tags) {
+        if (typeof tag !== "string" || !tag.trim()) {
+          errors.push(`Invalid tag: ${JSON.stringify(tag)}`);
+        } else {
+          const trimmedTag = tag.trim();
+          if (trimmedTag.startsWith("#")) {
+            errors.push(`Tag "${tag}" must not include leading '#' symbol`);
+          }
+          if (!VALID_TAG_REGEX.test(trimmedTag)) {
+            errors.push(
+              `Tag "${tag}" contains invalid characters or uppercase letters (must match /^[a-z0-9_-]+$/)`
+            );
+          }
         }
       }
     }
   }
 
   // 8. Validate Duration
-  if (typeof record.duration !== "string" || !DURATION_REGEX.test(record.duration.trim())) {
-    if ("duration" in record) {
+  if (record.duration !== undefined && record.duration !== null) {
+    if (typeof record.duration !== "string" || !DURATION_REGEX.test(record.duration.trim())) {
       errors.push(
         `Invalid duration: "${record.duration}" (expected format M:SS or MM:SS, e.g. "0:24", "1:45")`
       );
@@ -415,11 +665,25 @@ export function validateContentRecord(record, options = {}) {
     }
   }
 
+  // Validate trending boolean
+  if (record.trending !== undefined && record.trending !== null) {
+    if (typeof record.trending !== "boolean") {
+      errors.push(`Property 'trending' must be a boolean, got ${typeof record.trending}`);
+    }
+  }
+
   // 9. Validate Media Details & Consistency (Schema & Aspect Ratio)
   if (record.media !== undefined && record.media !== null) {
     if (typeof record.media !== "object" || Array.isArray(record.media)) {
       errors.push("media property must be an object");
     } else {
+      // Reject explicit nulls inside media
+      for (const [mK, mV] of Object.entries(record.media)) {
+        if (mV === null) {
+          errors.push(`media.${mK} cannot be null`);
+        }
+      }
+
       // Check additionalProperties: false on media
       for (const mKey of Object.keys(record.media)) {
         if (!ALLOWED_MEDIA_KEYS.includes(mKey)) {
@@ -430,7 +694,7 @@ export function validateContentRecord(record, options = {}) {
       const { aspectRatio, width, height, codec, audioCodec, frameRate, bitrateKbps, loudnessLkfs } =
         record.media;
 
-      if (aspectRatio !== undefined) {
+      if (aspectRatio !== undefined && aspectRatio !== null) {
         if (!ALLOWED_ASPECT_RATIOS.includes(aspectRatio)) {
           errors.push(
             `Invalid aspectRatio '${aspectRatio}'. Allowed: ${ALLOWED_ASPECT_RATIOS.join(", ")}`
@@ -438,35 +702,35 @@ export function validateContentRecord(record, options = {}) {
         }
       }
 
-      if (codec !== undefined && !ALLOWED_CODECS.includes(codec)) {
+      if (codec !== undefined && codec !== null && !ALLOWED_CODECS.includes(codec)) {
         errors.push(`Unsupported codec '${codec}'. Allowed: ${ALLOWED_CODECS.join(", ")}`);
       }
 
-      if (audioCodec !== undefined && !ALLOWED_AUDIO_CODECS.includes(audioCodec)) {
+      if (audioCodec !== undefined && audioCodec !== null && !ALLOWED_AUDIO_CODECS.includes(audioCodec)) {
         errors.push(
           `Unsupported audioCodec '${audioCodec}'. Allowed: ${ALLOWED_AUDIO_CODECS.join(", ")}`
         );
       }
 
-      if (width !== undefined) {
+      if (width !== undefined && width !== null) {
         if (typeof width !== "number" || !Number.isInteger(width) || width < 320 || width > 7680) {
           errors.push(`media.width must be an integer between 320 and 7680, got ${width}`);
         }
       }
 
-      if (height !== undefined) {
+      if (height !== undefined && height !== null) {
         if (typeof height !== "number" || !Number.isInteger(height) || height < 320 || height > 4320) {
           errors.push(`media.height must be an integer between 320 and 4320, got ${height}`);
         }
       }
 
-      if (frameRate !== undefined) {
+      if (frameRate !== undefined && frameRate !== null) {
         if (typeof frameRate !== "number" || frameRate < 23.976 || frameRate > 120) {
           errors.push(`media.frameRate must be a number between 23.976 and 120, got ${frameRate}`);
         }
       }
 
-      if (bitrateKbps !== undefined) {
+      if (bitrateKbps !== undefined && bitrateKbps !== null) {
         if (
           typeof bitrateKbps !== "number" ||
           !Number.isInteger(bitrateKbps) ||
@@ -479,7 +743,7 @@ export function validateContentRecord(record, options = {}) {
         }
       }
 
-      if (loudnessLkfs !== undefined) {
+      if (loudnessLkfs !== undefined && loudnessLkfs !== null) {
         if (typeof loudnessLkfs !== "number" || loudnessLkfs < -30 || loudnessLkfs > -5) {
           errors.push(
             `media.loudnessLkfs must be a number between -30 and -5, got ${loudnessLkfs}`
@@ -511,34 +775,24 @@ export function validateContentRecord(record, options = {}) {
   // 10. Validate Asset References & Staged Files
   const checkAssetFiles = mode === "assets" || mode === "publish";
 
-  if (typeof record.poster !== "string" || !record.poster.trim()) {
-    if ("poster" in record) errors.push("Missing or empty poster asset reference");
-  } else if (!POSTER_PATH_REGEX.test(record.poster.trim())) {
-    errors.push(
-      `Poster path '${record.poster}' does not match required pattern (must end in .svg, .png, .jpg, .jpeg, or .webp)`
-    );
-  } else if (checkAssetFiles) {
-    if (record.poster.startsWith("http://") || record.poster.startsWith("https://")) {
+  if (record.poster !== undefined && record.poster !== null) {
+    if (typeof record.poster !== "string" || !record.poster.trim()) {
+      errors.push("Poster must be a non-empty string");
+    } else if (!POSTER_PATH_REGEX.test(record.poster.trim())) {
       errors.push(
-        `Remote poster reference '${record.poster}' cannot be verified offline. Staged local media is required for production publication.`
+        `Poster path '${record.poster}' does not match required pattern (must end in .svg, .png, .jpg, .jpeg, or .webp)`
       );
-    } else {
-      const normalized = record.poster.startsWith("/") ? record.poster.slice(1) : record.poster;
-      const targetFile = resolve(publicDir, normalized);
-      // Containment check
-      const mediaDir = resolve(publicDir, "media");
-      const brandDir = resolve(publicDir, "brand");
-      if (
-        !targetFile.startsWith(mediaDir + sep) &&
-        !targetFile.startsWith(brandDir + sep) &&
-        targetFile !== publicDir
-      ) {
+    } else if (checkAssetFiles) {
+      if (record.poster.startsWith("http://") || record.poster.startsWith("https://")) {
         errors.push(
-          `Unsafe asset path: "${record.poster}" resolves outside public/media or public/brand directory`
+          `Remote poster reference '${record.poster}' cannot be verified offline. Staged local media is required for production publication.`
         );
       } else {
+        const normalized = record.poster.startsWith("/") ? record.poster.slice(1) : record.poster;
+        const targetFile = resolve(publicDir, normalized);
         try {
-          verifyAssetBytesStreaming(targetFile);
+          const realTarget = verifyAssetPathContainment(targetFile, publicDir);
+          verifyAssetBytesStreaming(realTarget);
         } catch (err) {
           errors.push(`Poster asset verification failed (${record.poster}): ${err.message}`);
         }
@@ -546,46 +800,128 @@ export function validateContentRecord(record, options = {}) {
     }
   }
 
-  if (typeof record.source !== "string" || !record.source.trim()) {
-    if ("source" in record) errors.push("Missing or empty source video reference");
-  } else if (!VIDEO_PATH_REGEX.test(record.source.trim())) {
-    errors.push(
-      `Source video path '${record.source}' does not match required pattern (must end in .mp4, .webm, or .m4v)`
-    );
-  } else if (checkAssetFiles) {
-    if (record.source.startsWith("http://") || record.source.startsWith("https://")) {
+  let inspectedStreamResult = null;
+
+  if (record.source !== undefined && record.source !== null) {
+    if (typeof record.source !== "string" || !record.source.trim()) {
+      errors.push("Source video must be a non-empty string");
+    } else if (!VIDEO_PATH_REGEX.test(record.source.trim())) {
       errors.push(
-        `Remote video reference '${record.source}' cannot be verified offline. Staged local media is required for production publication.`
+        `Source video path '${record.source}' does not match required pattern (must end in .mp4, .webm, or .m4v)`
       );
-    } else {
-      const normalized = record.source.startsWith("/") ? record.source.slice(1) : record.source;
-      const targetFile = resolve(publicDir, normalized);
-      // Containment check
-      const mediaDir = resolve(publicDir, "media");
-      const brandDir = resolve(publicDir, "brand");
-      if (
-        !targetFile.startsWith(mediaDir + sep) &&
-        !targetFile.startsWith(brandDir + sep) &&
-        targetFile !== publicDir
-      ) {
+    } else if (checkAssetFiles) {
+      if (record.source.startsWith("http://") || record.source.startsWith("https://")) {
         errors.push(
-          `Unsafe asset path: "${record.source}" resolves outside public/media or public/brand directory`
+          `Remote video reference '${record.source}' cannot be verified offline. Staged local media is required for production publication.`
         );
       } else {
+        const normalized = record.source.startsWith("/") ? record.source.slice(1) : record.source;
+        const targetFile = resolve(publicDir, normalized);
         try {
-          verifyAssetBytesStreaming(targetFile);
-          // If ffprobe is available, check streams
-          if (isFFprobeAvailable()) {
-            const probeResult = inspectVideoWithFFprobe(targetFile);
-            if (probeResult.available && probeResult.width && probeResult.height) {
-              if (format === "video" && probeResult.height > probeResult.width) {
+          const realTarget = verifyAssetPathContainment(targetFile, publicDir);
+          verifyAssetBytesStreaming(realTarget);
+
+          // Deep stream inspection with ffprobe (or injected inspector)
+          if (videoInspector) {
+            inspectedStreamResult = videoInspector(realTarget);
+
+            if (!inspectedStreamResult.available) {
+              if (mode === "publish") {
                 errors.push(
-                  `Actual media stream is portrait (${probeResult.width}x${probeResult.height}), incompatible with format "video"`
+                  `Publication readiness requirement failed (${record.source}): ffprobe is required for physical media stream certification before publication.`
                 );
-              } else if (format === "short" && probeResult.width > probeResult.height) {
+              } else {
+                warnings.push(
+                  `Technical stream inspection incomplete (${record.source}): ffprobe unavailable in environment.`
+                );
+              }
+            } else if (!inspectedStreamResult.ok) {
+              // ffprobe failed on the media stream
+              if (mode === "publish") {
                 errors.push(
-                  `Actual media stream is landscape (${probeResult.width}x${probeResult.height}), incompatible with format "short"`
+                  `Source video stream inspection failed (${record.source}): ${inspectedStreamResult.error}`
                 );
+              } else {
+                warnings.push(
+                  `Source video stream warning (${record.source}): ${inspectedStreamResult.error}`
+                );
+              }
+            } else {
+              // Successful stream inspection: validate actual dimensions, aspect ratio, codec, duration, frame rate
+              const { width, height, codec, durationSec, frameRate } = inspectedStreamResult;
+
+              // Validate dimensions against declared media metadata if declared
+              if (record.media?.width && width && record.media.width !== width) {
+                errors.push(
+                  `Actual stream width (${width}px) does not match declared media.width (${record.media.width}px)`
+                );
+              }
+              if (record.media?.height && height && record.media.height !== height) {
+                errors.push(
+                  `Actual stream height (${height}px) does not match declared media.height (${record.media.height}px)`
+                );
+              }
+
+              // Validate genuine aspect ratio
+              if (format === "video") {
+                if (height > width) {
+                  errors.push(
+                    `Actual media stream is portrait (${width}x${height}), incompatible with format "video"`
+                  );
+                } else {
+                  const ratio = width / height;
+                  // Genuine landscape: expected 16:9 (~1.777), allow widescreen within tolerance
+                  if (ratio < 1.30 || ratio > 2.50) {
+                    errors.push(
+                      `Actual video aspect ratio (${width}x${height}, ratio ${ratio.toFixed(3)}) is not a genuine landscape format (expected 16:9 ratio ~1.777)`
+                    );
+                  }
+                }
+              } else if (format === "short") {
+                if (width > height) {
+                  errors.push(
+                    `Actual media stream is landscape (${width}x${height}), incompatible with format "short"`
+                  );
+                } else {
+                  const verticalRatio = height / width;
+                  // Genuine portrait Short: 9:16 is ratio ~1.777 (or width/height ~0.562). Tolerance 1.70 to 1.86.
+                  if (verticalRatio < 1.70 || verticalRatio > 1.86) {
+                    errors.push(
+                      `Actual video aspect ratio (${width}x${height}, ratio ${(width / height).toFixed(3)}) is not a genuine portrait 9:16 Short (expected 9:16 portrait ratio ~0.562)`
+                    );
+                  }
+                }
+              }
+
+              // Validate codec if declared in media metadata
+              if (record.media?.codec && codec) {
+                const normalizedStreamCodec = normalizeCodec(codec);
+                const declaredCodec = normalizeCodec(record.media.codec);
+                if (normalizedStreamCodec !== declaredCodec) {
+                  errors.push(
+                    `Actual video codec '${codec}' does not match declared media.codec '${record.media.codec}'`
+                  );
+                }
+              }
+
+              // Validate frame rate if declared in media metadata (documented tolerance: ±0.5 fps)
+              if (record.media?.frameRate && typeof frameRate === "number") {
+                if (Math.abs(frameRate - record.media.frameRate) > 0.5) {
+                  errors.push(
+                    `Actual frame rate (${frameRate.toFixed(2)} fps) deviates from declared frameRate (${record.media.frameRate} fps) by more than 0.5 fps tolerance`
+                  );
+                }
+              }
+
+              // Validate duration if inspected (tolerance: ±3 seconds)
+              if (typeof durationSec === "number" && record.duration) {
+                const [minStr, secStr] = record.duration.split(":");
+                const declaredSec = parseInt(minStr, 10) * 60 + parseInt(secStr, 10);
+                if (Math.abs(durationSec - declaredSec) > 3.0) {
+                  errors.push(
+                    `Actual stream duration (${durationSec.toFixed(1)}s) deviates from declared duration '${record.duration}' (${declaredSec}s) by more than 3s tolerance`
+                  );
+                }
               }
             }
           }
@@ -601,6 +937,13 @@ export function validateContentRecord(record, options = {}) {
     if (typeof record.editorial !== "object" || Array.isArray(record.editorial)) {
       errors.push("editorial property must be an object");
     } else {
+      // Reject explicit nulls inside editorial
+      for (const [eK, eV] of Object.entries(record.editorial)) {
+        if (eV === null) {
+          errors.push(`editorial.${eK} cannot be null`);
+        }
+      }
+
       // Check additionalProperties: false on editorial
       for (const eKey of Object.keys(record.editorial)) {
         if (!ALLOWED_EDITORIAL_KEYS.includes(eKey)) {
@@ -613,29 +956,29 @@ export function validateContentRecord(record, options = {}) {
       const { reviewStatus, rightsCleared, sourceAttribution, curatorNotes, ownerAssetRef } =
         record.editorial;
 
-      if (reviewStatus !== undefined && !ALLOWED_REVIEW_STATUSES.includes(reviewStatus)) {
+      if (reviewStatus !== undefined && reviewStatus !== null && !ALLOWED_REVIEW_STATUSES.includes(reviewStatus)) {
         errors.push(
           `Invalid editorial.reviewStatus '${reviewStatus}'. Allowed: ${ALLOWED_REVIEW_STATUSES.join(", ")}`
         );
       }
 
-      if (rightsCleared !== undefined && typeof rightsCleared !== "boolean") {
+      if (rightsCleared !== undefined && rightsCleared !== null && typeof rightsCleared !== "boolean") {
         errors.push("editorial.rightsCleared must be a boolean");
       }
 
-      if (sourceAttribution !== undefined) {
+      if (sourceAttribution !== undefined && sourceAttribution !== null) {
         if (typeof sourceAttribution !== "string" || sourceAttribution.length > 500) {
           errors.push("editorial.sourceAttribution must be a string up to 500 characters");
         }
       }
 
-      if (curatorNotes !== undefined) {
+      if (curatorNotes !== undefined && curatorNotes !== null) {
         if (typeof curatorNotes !== "string" || curatorNotes.length > 1000) {
           errors.push("editorial.curatorNotes must be a string up to 1000 characters");
         }
       }
 
-      if (ownerAssetRef !== undefined) {
+      if (ownerAssetRef !== undefined && ownerAssetRef !== null) {
         if (typeof ownerAssetRef !== "string" || ownerAssetRef.length > 100) {
           errors.push("editorial.ownerAssetRef must be a string up to 100 characters");
         }
@@ -643,7 +986,7 @@ export function validateContentRecord(record, options = {}) {
     }
   }
 
-  // Publication Readiness Enforcement (FIX C)
+  // Publication Readiness Enforcement (FIX A & FIX C)
   if (mode === "publish") {
     if (!record.editorial) {
       errors.push(
@@ -668,6 +1011,7 @@ export function validateContentRecord(record, options = {}) {
     valid: errors.length === 0,
     errors,
     warnings,
+    inspectedStream: inspectedStreamResult,
   };
 }
 
@@ -684,6 +1028,17 @@ export function validateContentManifest(manifest, options = {}) {
   const errors = [];
   const warnings = [];
 
+  // Reject unsupported modes
+  if (!VALID_MODES.includes(mode)) {
+    return {
+      valid: false,
+      errors: [`Invalid validation mode '${mode}'. Allowed modes: ${VALID_MODES.join(", ")}`],
+      warnings: [],
+      mode,
+      summary: { total: 0, videos: 0, shorts: 0 },
+    };
+  }
+
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     return {
       valid: false,
@@ -698,6 +1053,14 @@ export function validateContentManifest(manifest, options = {}) {
   for (const rKey of Object.keys(manifest)) {
     if (!ALLOWED_ROOT_KEYS.includes(rKey)) {
       errors.push(`Unexpected root property '${rKey}' (schema forbids additionalProperties)`);
+    }
+  }
+
+  if (manifest.generatedAt !== undefined) {
+    if (!isValidDateTime(manifest.generatedAt)) {
+      errors.push(
+        `Manifest 'generatedAt' must be a valid RFC 3339 / ISO 8601 date-time string (e.g. '2026-10-18T12:00:00Z'), got '${manifest.generatedAt}'`
+      );
     }
   }
 
@@ -724,6 +1087,8 @@ export function validateContentManifest(manifest, options = {}) {
   ]);
   let videoCount = 0;
   let shortCount = 0;
+  let inspectedStreamCount = 0;
+  let streamErrors = 0;
 
   for (let idx = 0; idx < manifest.items.length; idx++) {
     const item = manifest.items[idx];
@@ -742,6 +1107,14 @@ export function validateContentManifest(manifest, options = {}) {
       }
     }
 
+    if (itemResult.inspectedStream) {
+      if (itemResult.inspectedStream.ok) {
+        inspectedStreamCount++;
+      } else {
+        streamErrors++;
+      }
+    }
+
     for (const err of itemResult.errors) {
       errors.push(`Item [index ${idx}${item?.id !== undefined ? `, id ${item.id}` : ""}]: ${err}`);
     }
@@ -750,13 +1123,39 @@ export function validateContentManifest(manifest, options = {}) {
     }
   }
 
-  // Inspection tool reporting for publication mode
-  let inspectionStatus = "OK";
-  if (mode === "publish" && !isFFprobeAvailable()) {
-    inspectionStatus = "INCOMPLETE (ffprobe unavailable in environment; physical stream properties cannot be certified)";
-    warnings.push(
-      "Notice: ffprobe is not installed in the local environment. While file headers and magic bytes were verified, physical video stream inspection (actual dimensions, CFR, audio channels) requires ffprobe before production release."
-    );
+  // Accurate stream inspection reporting
+  let streamInspection = "SKIPPED (Metadata preparation mode)";
+  if (mode === "publish") {
+    if (!isFFprobeAvailable() && !options.videoInspector) {
+      streamInspection = "FAILED (ffprobe unavailable in environment; publication blocked)";
+      errors.push(
+        "Publication requirement failed: ffprobe is not installed in the environment. Physical stream verification is mandatory for publication readiness."
+      );
+    } else if (streamErrors > 0) {
+      streamInspection = `FAILED (${streamErrors} streams undecodable or failed inspection)`;
+    } else if (inspectedStreamCount === manifest.items.length && manifest.items.length > 0) {
+      streamInspection = `VERIFIED (${inspectedStreamCount} video streams certified)`;
+    } else {
+      streamInspection = "INCOMPLETE (Streams not fully verified)";
+      if (mode === "publish") {
+        errors.push("Publication readiness requirement failed: All media streams must be verified.");
+      }
+    }
+  } else if (mode === "assets") {
+    if (inspectedStreamCount > 0) {
+      streamInspection = `VERIFIED (${inspectedStreamCount} streams inspected)`;
+    } else if (!isFFprobeAvailable()) {
+      streamInspection = "INCOMPLETE (ffprobe unavailable; technical stream inspection incomplete)";
+    } else {
+      streamInspection = "INCOMPLETE (no video streams inspected)";
+    }
+  }
+
+  let assetVerification = "SKIPPED (Metadata preparation mode)";
+  if (mode === "assets") {
+    assetVerification = "PERFORMED (Staged local assets verified)";
+  } else if (mode === "publish") {
+    assetVerification = "PERFORMED (Publication readiness verification)";
   }
 
   return {
@@ -764,11 +1163,8 @@ export function validateContentManifest(manifest, options = {}) {
     errors,
     warnings,
     mode,
-    assetVerification:
-      mode === "metadata"
-        ? "SKIPPED (Metadata preparation mode)"
-        : "PERFORMED (Staged local assets verified)",
-    streamInspection: inspectionStatus,
+    assetVerification,
+    streamInspection,
     summary: {
       total: manifest.items.length,
       videos: videoCount,
@@ -852,16 +1248,17 @@ export async function validateLiveCatalog(root = projectRoot) {
 
 /**
  * Strip private editorial metadata for public client projection.
- * Enforces safe compilation boundary when strict: true.
+ * SAFE BY DEFAULT: Rejects unapproved or uncleared records unless allowDraft: true is explicitly provided.
  */
-export function projectToPublicEdit(item, { strict = false } = {}) {
-  if (!item || typeof item !== "object") {
+export function projectToPublicEdit(item, { allowDraft = false, strict = true } = {}) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
     throw new Error("Cannot project non-object to public edit");
   }
 
-  if (strict) {
-    const reviewStatus = item.editorial?.reviewStatus;
-    const rightsCleared = item.editorial?.rightsCleared;
+  const reviewStatus = item.editorial?.reviewStatus;
+  const rightsCleared = item.editorial?.rightsCleared;
+
+  if (!allowDraft && strict !== false) {
     if (reviewStatus !== "approved" && reviewStatus !== "published") {
       throw new Error(
         `Cannot project item ${item.id} to public catalog: editorial reviewStatus must be 'approved' or 'published', got '${reviewStatus}'`
@@ -909,6 +1306,14 @@ export function projectToPublicEdit(item, { strict = false } = {}) {
   return publicRecord;
 }
 
+/**
+ * Non-public preview projection function.
+ * Explicitly allows draft and unreviewed items for development preview only.
+ */
+export function projectToPreviewEdit(item) {
+  return projectToPublicEdit(item, { allowDraft: true });
+}
+
 // CLI Execution entry point
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
@@ -924,13 +1329,28 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     } else if (args[i] === "--mode" && args[i + 1]) {
       mode = args[i + 1];
       i++;
+      if (!VALID_MODES.includes(mode)) {
+        console.error(`Error: Invalid validation mode '${mode}'. Allowed modes: ${VALID_MODES.join(", ")}`);
+        process.exit(1);
+      }
+    } else if (args[i].startsWith("--mode=")) {
+      mode = args[i].slice("--mode=".length);
+      if (!VALID_MODES.includes(mode)) {
+        console.error(`Error: Invalid validation mode '${mode}'. Allowed modes: ${VALID_MODES.join(", ")}`);
+        process.exit(1);
+      }
     } else if (args[i] === "--publish" || args[i] === "--publication-ready") {
       mode = "publish";
     } else if (args[i] === "--verify-assets" || args[i] === "--assets") {
       mode = "assets";
+    } else if (args[i] === "--metadata") {
+      mode = "metadata";
     } else if (args[i].endsWith(".json")) {
       manifestPath = resolve(args[i]);
       checkLive = false;
+    } else {
+      console.error(`Error: Unrecognized option '${args[i]}'. Allowed options: --manifest <path>, --mode <${VALID_MODES.join("|")}>, --publish, --assets, --metadata`);
+      process.exit(1);
     }
   }
 

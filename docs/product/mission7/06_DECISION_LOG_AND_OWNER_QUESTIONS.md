@@ -1,6 +1,6 @@
 # Mission 7A — Decision Log and Owner Requirements
 
-## 1. Architectural Decisions Log (V1 & V2)
+## 1. Architectural Decisions Log (V1, V2 & V3)
 
 | ID | Topic | Decision | Rationale |
 | :--- | :--- | :--- | :--- |
@@ -15,15 +15,20 @@
 | **DEC-709** | Safe Compilation Boundary | `projectToPublicEdit({ strict: true })` throws if an item lacks approved review or documented rights clearance. | Provides programmatic enforcement against deploying unreviewed or uncleared content. |
 | **DEC-710** | Private Manifest Protection | Added `content/manifest.json`, `content/*.private.json`, and `content/staging/` to `.gitignore`. | Guarantees that working manifests containing private licensing notes cannot be accidentally pushed to GitHub. |
 | **DEC-711** | CI Integration Gate | Wired `pnpm check:content` directly into `.github/workflows/frontend-ci.yml`. | Automatically validates live catalog invariants (17 items, 0 shorts, 0 drift) on every pull request and push to main. |
+| **DEC-712** | Fail-Closed Publication Readiness | Publication readiness requires successful media stream inspection. Corrupted, undecodable, or missing streams fail closed. Missing ffprobe in publish mode strictly fails closed. | Prevents header-only stubs or unplayable media from entering production catalogs. |
+| **DEC-713** | Authoritative Schema Reconciliation | JSON schema (`content/manifest.schema.json`) constraints are fully reconciled at runtime via `validateJsonSchema`. String `trending`, explicit `null` values, and invalid `generatedAt` timestamps are strictly rejected. | Guarantees zero discrepancy between declared JSON Schema and validation runtime. |
+| **DEC-714** | Resolved Realpath Containment | Asset containment checks resolve real filesystem targets (`realpathSync`) to block symlinks inside `public/media/` from escaping permitted directories. | Eliminates symlink escape bypasses while preserving valid local media paths. |
+| **DEC-715** | Safe-by-Default Projection | `projectToPublicEdit(item)` defaults to strict publication clearance without requiring optional safety flags. Separate `projectToPreviewEdit(item)` is provided for non-public preview. | Eliminates risk of developers omitting safety flags and projecting unapproved records to public bundles. |
+| **DEC-716** | Strict CLI Mode Validation | Validator CLI and programmatic API strictly validate `--mode` (accepting only `metadata`, `assets`, `publish`). Unsupported modes exit with non-zero code. | Prevents misconfigured CI scripts or typoed flags from skipping critical quality checks. |
 
 ---
 
 ## 2. Intentional Limitations and Tool Dependencies
 
 1. **FFprobe Dependency for Physical Stream Certification:**
-   - In environments where `ffprobe` is installed, the validator verifies actual stream dimensions and codecs.
-   - When `ffprobe` is not installed (e.g. standard minimal container environments), the validator checks file existence, size, and container magic bytes, and explicitly reports: `streamInspection: "INCOMPLETE (ffprobe unavailable in environment)"`.
-   - The system does not fabricate physical dimension verification from declared metadata alone.
+   - In publication mode (`--mode publish`), `ffprobe` is **mandatory**. If ffprobe is unavailable or fails on an undecodable stream, publication validation fails closed with a fatal error.
+   - In asset staging mode (`--mode assets`), missing ffprobe reports `streamInspection: "INCOMPLETE (ffprobe unavailable; technical stream inspection incomplete)"` without claiming publication readiness.
+   - In metadata preparation mode (`--mode metadata`), physical stream checks are skipped, keeping metadata linting 100% usable without ffprobe.
 2. **Offline-Only Media Validation:**
    - External URLs (`https://...`) are permitted during metadata intake but flagged during asset verification because remote files cannot be verified offline. Production content is required to be staged in local `/media/` directories.
 
@@ -57,8 +62,8 @@ All verification gates have been executed on branch `feat/mission7a-content-inge
 
 1. **Frontend Unit & Integration Tests:**
    - Command: `npm test`
-   - Result: **145 passed (0 failed)** across 10 test files.
-   - Includes 18 comprehensive tests in [`tests/content-validation.test.mjs`](file:///home/vuld0/Lolixco/tests/content-validation.test.mjs) verifying schema validation, malformed types, streaming buffer inspection, path traversal containment, editorial publication rules, ID allocation, and live catalog invariants.
+   - Result: **161 passed (0 failed)** across 10 test files.
+   - Includes 34 comprehensive tests in [`tests/content-validation.test.mjs`](file:///home/vuld0/Lolixco/tests/content-validation.test.mjs) verifying schema validation, malformed types, fail-closed stream inspection, MP4 header-stub rejection, symlink escape prevention, safe-by-default projection, CLI mode rejection, ID allocation, and live catalog invariants.
 2. **TypeScript Compilation:**
    - Command: `npm run typecheck`
    - Result: **0 type errors**.
@@ -73,11 +78,11 @@ All verification gates have been executed on branch `feat/mission7a-content-inge
    - Result: **20 referenced assets verified (2,904,955 bytes)**.
 6. **Content Validation Foundation Check:**
    - Command: `npm run check:content`
-   - Result: **Live catalog verified (17 demo edits, 0 shorts, 0 errors)**.
+   - Result: **Live catalog verified (17 demo edits, 0 shorts, 0 drift)**.
    - Command: `node scripts/validate-content.mjs --manifest content/manifest.template.json --mode metadata`
    - Result: **Template verified in metadata mode (1 video, 1 short, 0 errors)**.
    - Command: `node scripts/validate-content.mjs --manifest content/manifest.template.json --mode publish`
-   - Result: **Correctly rejected publication readiness due to draft status and unverified rights**.
+   - Result: **Correctly rejected publication readiness due to draft status, unverified rights, and missing ffprobe**.
 7. **Production Build:**
    - Command: `npm run build`
    - Result: **Vite production bundle built successfully (0 errors, 0 warnings)**.

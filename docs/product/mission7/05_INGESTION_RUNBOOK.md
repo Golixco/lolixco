@@ -86,16 +86,16 @@ Execute final pre-publication gate:
 ```bash
 npm run check:content -- --manifest content/manifest.json --mode publish
 ```
-*Expected output:* Enforces that `reviewStatus` is `"approved"` or `"published"`, `rightsCleared` is `true`, assets are verified, and reports ffprobe stream inspection status.
+*Expected output:* Enforces that `reviewStatus` is `"approved"` or `"published"`, `rightsCleared` is `true`, staged assets are verified, and physical video streams are certified via ffprobe (dimensions, genuine 9:16 portrait ratio for Shorts, codecs, and tolerances). **Fails closed** with fatal error if ffprobe is unavailable or streams are undecodable.
 
 ---
 
 ## Phase 4 — Catalog Compilation & Recsys Sync
 
 ### Step 4.1: Project Public Metadata into `src/data/edits.ts`
-Compile validated records into `src/data/edits.ts` using `projectToPublicEdit({ strict: true })`.
+Compile validated records into `src/data/edits.ts` using `projectToPublicEdit(item)`.
 
-*Security guarantee:* `projectToPublicEdit({ strict: true })` throws if an item lacks approved review or rights clearance, and completely strips all private editorial fields, setting `creator: "Lolixco curated"`.
+*Security guarantee:* `projectToPublicEdit(item)` is **safe by default** and throws immediately if an item lacks approved review or rights clearance. It completely strips all private editorial fields, setting `creator: "Lolixco curated"`. For development-only previews, call `projectToPreviewEdit(item)`.
 
 ### Step 4.2: Update Recommendation Engine Snapshot (Mission 7B)
 ```bash

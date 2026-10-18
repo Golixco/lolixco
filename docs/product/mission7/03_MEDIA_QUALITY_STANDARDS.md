@@ -83,9 +83,9 @@ Posters serve as preview cards on discovery feeds, search results, and video pla
 When owner media assets are staged, they are subject to automated verification at two levels:
 
 ### 5.1 Local Deterministic Validation (`scripts/validate-content.mjs`)
-Implemented in Node.js with zero external dependencies:
+Implemented in Node.js with zero external runtime dependencies:
 - **Streaming Header Inspection:** Rather than reading multi-megabyte video files into memory, the validator opens the file descriptor and reads only the initial header bytes (up to 64KB) to verify signatures.
-- **Safe Directory Containment:** All local paths starting with `/media/` or `/brand/` are strictly resolved relative to `public/`. Any path traversal (`../`) resolving outside these boundaries is immediately rejected.
+- **Safe Directory Containment (`realpathSync`):** All local paths starting with `/media/` or `/brand/` are strictly verified using resolved real filesystem paths (`fs.realpathSync`). Any directory traversal (`../`) or symlinks inside `public/media` pointing to files outside permitted directories are immediately caught and rejected.
 - **External URL Policy:** External URLs (`http://`, `https://`) are permitted during metadata preparation with a notice, but are strictly prohibited for production publication readiness (staged local assets are required).
 - **Header & Magic Bytes Signatures:**
   - `.svg`: Root `<svg` element signature.
@@ -95,7 +95,14 @@ Implemented in Node.js with zero external dependencies:
   - `.webm`: EBML header ID `1a45dfa3`.
   - `.mp4` / `.m4v`: ISO Base Media File Format `ftyp` box at byte offset 4 (`66747970`).
 
-### 5.2 Deep Media Stream Inspection (FFprobe)
-- **Automatic Detection:** The validator checks whether `ffprobe` is installed in PATH.
-- **When FFprobe is available:** The validator executes `ffprobe` to verify that actual video stream dimensions match the declared format (width > height for `video`, height > width for `short`).
-- **When FFprobe is unavailable:** The validator records `streamInspection: "INCOMPLETE (ffprobe unavailable)"`. Publication readiness mode issues an explicit warning noting that physical stream certification remains incomplete until ffprobe is executed.
+### 5.2 Deep Media Stream Inspection & Fail-Closed Publication Enforcement
+- **Fail-Closed Publication Readiness:** A valid file header (magic bytes) alone is insufficient for publication. Publication readiness mode (`--mode publish`) strictly requires successful media stream inspection. Missing, unreadable, corrupted, or undecodable video streams are fatal validation errors.
+- **FFprobe Availability Requirement:** If `ffprobe` is not installed in the environment during publication validation, publication readiness **strictly fails closed** with a fatal error. Stream inspection is never marked as `OK` when no valid stream was inspected.
+- **Metadata Intake Decoupling:** Metadata preparation (`--mode metadata`) remains 100% usable without ffprobe, allowing metadata editing and schema linting on machines without media toolchains.
+- **Asset Staging Technical Reporting:** Staged asset verification (`--mode assets`) reports technical stream inspection separately as `streamInspection: "INCOMPLETE (ffprobe unavailable...)"`, verifying byte signatures without claiming publication readiness.
+- **Genuine Portrait Aspect Ratio for Shorts:** For vertical Shorts (`format: "short"`), the validator enforces a genuine `9:16` aspect ratio (target `height / width` = 1.777, allowed tolerance `1.70` to `1.86`). Tall non-standard shapes (such as `1080x1081`) that merely satisfy `height > width` are strictly rejected.
+- **Declared Metadata Consistency:**
+  - **Dimensions:** Actual video stream width and height must match declared `media.width` and `media.height`.
+  - **Codec:** Normalized stream codec (e.g. `avc1` / `h264`, `hevc` / `h265`) must match declared `media.codec`.
+  - **Frame Rate:** Actual frame rate must match declared `media.frameRate` within documented tolerance (±0.5 fps, accounting for NTSC drop-frame rates like 23.976 vs 24 or 59.94 vs 60).
+  - **Duration:** Actual container stream duration must match declared `duration` within documented tolerance (±3.0 seconds, accounting for container cut priming and metadata headers).
