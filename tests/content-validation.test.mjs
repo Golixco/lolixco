@@ -25,6 +25,8 @@ import {
 import { FANDOM_REGISTRY } from "../src/data/fandoms.ts";
 import { edits } from "../src/data/edits.ts";
 
+const hasPythonJsonschema = spawnSync("python3", ["-c", "import jsonschema"]).status === 0;
+
 const MOCK_VALID_VIDEO = {
   id: 101,
   format: "video",
@@ -867,12 +869,13 @@ test("FIX B: Comprehensive regression test comparing representative invalid docu
     assert.equal(validatorValid, false, `Doc ${doc.name} should fail validator`);
     assert.equal(validatorErrors.length > 0, true);
 
-    // 2. Python jsonschema outcome
-    const pythonCheck = spawnSync(
-      "python3",
-      [
-        "-c",
-        `
+    // 2. Python jsonschema outcome (when jsonschema package is available)
+    if (hasPythonJsonschema) {
+      const pythonCheck = spawnSync(
+        "python3",
+        [
+          "-c",
+          `
 import json, jsonschema, sys
 with open('content/manifest.schema.json') as f:
     schema = json.load(f)
@@ -884,19 +887,20 @@ if not is_manifest:
 errors = [e.message for e in validator.iter_errors(doc)]
 print(len(errors))
 `,
-        JSON.stringify(doc.data),
-        String(doc.isManifest),
-      ],
-      { encoding: "utf8" }
-    );
+          JSON.stringify(doc.data),
+          String(doc.isManifest),
+        ],
+        { encoding: "utf8" }
+      );
 
-    assert.equal(pythonCheck.status, 0);
-    const pythonErrorCount = parseInt(pythonCheck.stdout.trim(), 10);
-    assert.equal(
-      pythonErrorCount > 0,
-      true,
-      `Python jsonschema must agree with validator that ${doc.name} is invalid (python reported ${pythonErrorCount} errors)`
-    );
+      assert.equal(pythonCheck.status, 0);
+      const pythonErrorCount = parseInt(pythonCheck.stdout.trim(), 10);
+      assert.equal(
+        pythonErrorCount > 0,
+        true,
+        `Python jsonschema must agree with validator that ${doc.name} is invalid (python reported ${pythonErrorCount} errors)`
+      );
+    }
   }
 });
 
@@ -1509,12 +1513,13 @@ test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema: re
   assert.equal(res.valid, false, "Manifest with numeric description must fail");
   assert.match(res.errors.join("; "), /Property 'description' must be of type string, got number/);
 
-  // Confirm Python jsonschema agreement
-  const pythonCheck = spawnSync(
-    "python3",
-    [
-      "-c",
-      `
+  // Confirm Python jsonschema agreement (when jsonschema package is available)
+  if (hasPythonJsonschema) {
+    const pythonCheck = spawnSync(
+      "python3",
+      [
+        "-c",
+        `
 import json, jsonschema, sys
 with open('content/manifest.schema.json') as f:
     schema = json.load(f)
@@ -1523,12 +1528,13 @@ doc = json.loads(sys.argv[1])
 errors = [e.message for e in v.iter_errors(doc)]
 print(len(errors))
 `,
-      JSON.stringify(badManifest),
-    ],
-    { encoding: "utf8" }
-  );
-  assert.equal(pythonCheck.status, 0);
-  assert.equal(parseInt(pythonCheck.stdout.trim(), 10) > 0, true, "Python jsonschema must reject numeric root description");
+        JSON.stringify(badManifest),
+      ],
+      { encoding: "utf8" }
+    );
+    assert.equal(pythonCheck.status, 0);
+    assert.equal(parseInt(pythonCheck.stdout.trim(), 10) > 0, true, "Python jsonschema must reject numeric root description");
+  }
 });
 
 test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema: rejects calendar-invalid generatedAt", () => {
@@ -1551,12 +1557,13 @@ test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema: re
     assert.equal(res.valid, false, `Date ${badDate} should fail validation`);
     assert.match(res.errors.join("; "), /must be a valid RFC 3339 \/ ISO 8601 date-time string/);
 
-    // Confirm Python jsonschema agreement
-    const pythonCheck = spawnSync(
-      "python3",
-      [
-        "-c",
-        `
+    // Confirm Python jsonschema agreement (when jsonschema package is available)
+    if (hasPythonJsonschema) {
+      const pythonCheck = spawnSync(
+        "python3",
+        [
+          "-c",
+          `
 import json, jsonschema, sys
 with open('content/manifest.schema.json') as f:
     schema = json.load(f)
@@ -1565,16 +1572,17 @@ doc = json.loads(sys.argv[1])
 errors = [e.message for e in v.iter_errors(doc)]
 print(len(errors))
 `,
-        JSON.stringify(badManifest),
-      ],
-      { encoding: "utf8" }
-    );
-    assert.equal(pythonCheck.status, 0);
-    assert.equal(
-      parseInt(pythonCheck.stdout.trim(), 10) > 0,
-      true,
-      `Python jsonschema must reject calendar-invalid date ${badDate}`
-    );
+          JSON.stringify(badManifest),
+        ],
+        { encoding: "utf8" }
+      );
+      assert.equal(pythonCheck.status, 0);
+      assert.equal(
+        parseInt(pythonCheck.stdout.trim(), 10) > 0,
+        true,
+        `Python jsonschema must reject calendar-invalid date ${badDate}`
+      );
+    }
   }
 });
 
