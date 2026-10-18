@@ -14,30 +14,31 @@ export interface SearchResult {
 }
 
 /**
- * Weights when query contains at least one hashtag (Sum = 100%)
+ * Weights when query contains at least one hashtag (Sum = 100%).
+ * Creator metadata is excluded from public search ranking.
  */
 export const HASHTAG_WEIGHTS = {
   hashtag: 0.40,
   title: 0.30,
   category: 0.15, // Category / Topic (incorporates tags for topic relevance)
-  description: 0.10,
-  creator: 0.05,
+  description: 0.15,
+  creator: 0.00,
 } as const;
 
 /**
- * Weights redistributed proportionally for queries without hashtags (Sum = 100%)
- * hashtag weight (0.40) redistributed across remaining 0.60 base:
+ * Weights redistributed proportionally for queries without hashtags (Sum = 100%).
+ * Hashtag weight (0.40) redistributed across remaining 0.60 base:
  * title: 0.30 / 0.60 = 50%
  * category: 0.15 / 0.60 = 25%
- * description: 0.10 / 0.60 = 16.67%
- * creator: 0.05 / 0.60 = 8.33%
+ * description: 0.15 / 0.60 = 25%
+ * creator: 0.00 (excluded from public search)
  */
 export const NON_HASHTAG_WEIGHTS = {
   hashtag: 0.00,
   title: 0.30 / 0.60, // 0.50
   category: 0.15 / 0.60, // 0.25
-  description: 0.10 / 0.60, // ~0.16667
-  creator: 0.05 / 0.60, // ~0.08333
+  description: 0.15 / 0.60, // 0.25
+  creator: 0.00,
 } as const;
 
 /**
@@ -99,20 +100,38 @@ export function matchQuality(source: string, token: string): number {
 }
 
 /**
- * Determine if an edit satisfies the active category / trending filter.
+ * Determine if an edit satisfies the active category filter.
+ * Supports "All" as browsing mode, "Featured" / "New" for compatibility,
+ * and case-insensitive matching for content categories.
  */
 export function matchesCategoryFilter(edit: Edit, category: string): boolean {
-  if (!category || category === "Featured" || category === "New") {
+  if (!category || category === "All" || category === "Featured" || category === "New") {
     return true;
   }
   if (category === "Trending") {
     return !!edit.trending;
   }
-  return edit.category === category;
+  return edit.category.toLowerCase() === category.toLowerCase();
+}
+
+/**
+ * Determine if an edit satisfies the active structured fandom filter.
+ * Multi-word fandoms are resolved via canonical slug IDs, not freeform string search.
+ */
+export function matchesFandomFilter(edit: Edit, fandomId?: string): boolean {
+  if (!fandomId || fandomId === "all" || fandomId.trim() === "") {
+    return true;
+  }
+  const cleanFandom = fandomId.trim().toLowerCase();
+  return (
+    edit.fandomIds?.some((id) => id.trim().toLowerCase() === cleanFandom) ??
+    false
+  );
 }
 
 /**
  * Evaluate score and match status for a single query term against an edit.
+ * Internal creator metadata is NOT matched, ensuring creator anonymity.
  */
 export function scoreTerm(
   edit: Edit,
@@ -137,32 +156,28 @@ export function scoreTerm(
     }
     reasons.push(`Exact tag #${term.clean}`);
 
-    // Secondary matches across other fields contribute secondary weights
+    // Secondary matches across public fields contribute secondary weights
     const qTitle = matchQuality(edit.title, term.clean);
     const qCat = matchQuality(edit.category, term.clean);
     const qDesc = matchQuality(edit.description, term.clean);
-    const qCreator = matchQuality(edit.creator, term.clean);
 
     if (qTitle > 0) reasons.push(`Title match (${term.clean})`);
     if (qCat > 0) reasons.push(`Category match (${term.clean})`);
     if (qDesc > 0) reasons.push(`Description match (${term.clean})`);
-    if (qCreator > 0) reasons.push(`Creator match (${term.clean})`);
 
     const score =
       weights.hashtag * 1.0 +
       weights.title * qTitle +
       weights.category * qCat +
-      weights.description * qDesc +
-      weights.creator * qCreator;
+      weights.description * qDesc;
 
     return { matched: true, score: Math.min(score, 1.0), reasons };
   } else {
-    // Normal text query: can match Title, Description, Creator, and Category/Topic
+    // Normal text query: can match Title, Description, and Category/Topic
     // Crucially: ordinary tag relevance is incorporated into the category/topic signal
     const qTitle = matchQuality(edit.title, term.clean);
     const qCat = matchQuality(edit.category, term.clean);
     const qDesc = matchQuality(edit.description, term.clean);
-    const qCreator = matchQuality(edit.creator, term.clean);
 
     // Evaluate tag matches as part of category/topic relevance
     let qTagMax = 0;
@@ -180,9 +195,8 @@ export function scoreTerm(
       else reasons.push(`Tag topic match (${term.clean})`);
     }
     if (qDesc > 0) reasons.push(`Description match (${term.clean})`);
-    if (qCreator > 0) reasons.push(`Creator match (${term.clean})`);
 
-    const bestQuality = Math.max(qTitle, qTopic, qDesc, qCreator);
+    const bestQuality = Math.max(qTitle, qTopic, qDesc);
     if (bestQuality === 0) {
       return { matched: false, score: 0, reasons: [] };
     }
@@ -190,8 +204,7 @@ export function scoreTerm(
     const score =
       weights.title * qTitle +
       weights.category * qTopic +
-      weights.description * qDesc +
-      weights.creator * qCreator;
+      weights.description * qDesc;
 
     return { matched: true, score: Math.min(score, 1.0), reasons };
   }
@@ -207,18 +220,23 @@ export function scoreTerm(
  * - Safe rejection of bare/malformed hashtags.
  * - Score normalization to [0, 1] across variable query lengths.
  * - Deterministic sorting: score DESC, then numeric Edit.id ASC (preserving ID 0).
- * - Category and Trending filtering.
+ * - Category and structured Fandom filtering.
  */
 export function searchEdits(
   allEdits: Edit[],
   query: string,
-  category: string = "Featured"
+  category: string = "All",
+  fandomId?: string
 ): SearchResult[] {
   const terms = parseQuery(query);
 
-  // Fast path: Empty query returns category-filtered edits
+  // Fast path: Empty query returns category- and fandom-filtered edits
   if (terms.length === 0) {
-    const base = allEdits.filter((edit) => matchesCategoryFilter(edit, category));
+    const base = allEdits.filter(
+      (edit) =>
+        matchesCategoryFilter(edit, category) &&
+        matchesFandomFilter(edit, fandomId)
+    );
     const sorted = category === "New" ? [...base].reverse() : base;
     return sorted.map((edit) => ({
       edit,
@@ -241,11 +259,16 @@ export function searchEdits(
       continue;
     }
 
+    // 2. Check structured fandom filter
+    if (!matchesFandomFilter(edit, fandomId)) {
+      continue;
+    }
+
     let allTermsMatched = true;
     let sumScore = 0;
     const allReasons: string[] = [];
 
-    // 2. Conjunction (AND): Every term must match
+    // 3. Conjunction (AND): Every term must match
     for (const term of terms) {
       const { matched, score, reasons } = scoreTerm(
         edit,
@@ -271,7 +294,7 @@ export function searchEdits(
     }
   }
 
-  // 3. Deterministic Sort:
+  // 4. Deterministic Sort:
   // Primary: Score DESC
   // Secondary: numeric Edit.id ASC (preserving ID 0 and stable ordering)
   results.sort((a, b) => {
@@ -290,7 +313,8 @@ export function searchEdits(
 export function getRankedEdits(
   allEdits: Edit[],
   query: string,
-  category: string = "Featured"
+  category: string = "All",
+  fandomId?: string
 ): Edit[] {
-  return searchEdits(allEdits, query, category).map((r) => r.edit);
+  return searchEdits(allEdits, query, category, fandomId).map((r) => r.edit);
 }

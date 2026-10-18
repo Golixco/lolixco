@@ -1,24 +1,24 @@
 import { useEffect, useRef } from "react";
-import { Menu, Search, X, Plus, Bell } from "lucide-react";
+import { Menu, Search, X, CircleHelp } from "lucide-react";
 import { BrandLogo } from "./BrandLogo";
+
+export interface HeaderProps {
+  expanded: boolean;
+  toggle: () => void;
+  query: string;
+  setQuery: (q: string) => void;
+  open?: (modalName: string) => void;
+  onHome: () => void;
+}
 
 export default function Header({
   expanded,
   toggle,
   query,
   setQuery,
-  member,
   open,
   onHome,
-}: {
-  onHome: () => void;
-  expanded: boolean;
-  toggle: () => void;
-  query: string;
-  setQuery: (q: string) => void;
-  member: boolean;
-  open: (s: string) => void;
-}) {
+}: HeaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -106,34 +106,16 @@ export default function Header({
         )}
       </form>
       <div className="header-actions">
-        {member ? (
-          <>
-            <span className="preview-label">Member preview</span>
-            <button onClick={() => open("Create")} className="create">
-              <Plus /> <span>Create</span>
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Notifications"
-              onClick={() => open("Notifications")}
-            >
-              <Bell />
-            </button>
-            <button
-              className="avatar"
-              aria-label="Profile menu"
-              onClick={() => open("Profile")}
-            >
-              L
-            </button>
-          </>
-        ) : (
-          <>
-            <button onClick={() => open("Sign In")}>Sign In</button>
-            <button className="primary" onClick={() => open("Sign Up")}>
-              Sign Up
-            </button>
-          </>
+        {open && (
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Help and shortcuts"
+            title="Help & Shortcuts"
+            onClick={() => open("Help")}
+          >
+            <CircleHelp size={20} />
+          </button>
         )}
       </div>
     </header>

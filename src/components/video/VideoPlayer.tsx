@@ -178,12 +178,8 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
           <Award size={15} /> EDIT OF THE MOMENT
         </span>
         <h1>{edit.title}</h1>
-        <div className="creator">
-          <span className="creator-avatar">L</span>
-          <span>
-            {edit.creator}
-            <small>{edit.category} · Original demo study</small>
-          </span>
+        <div className="hero-meta">
+          <span>{edit.category} · Sample edit</span>
         </div>
         <button
           className="primary watch"

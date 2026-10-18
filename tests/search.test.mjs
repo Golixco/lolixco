@@ -126,14 +126,24 @@ test("Multiple hashtags require all tags (AND conjunction)", () => {
 });
 
 test("Mixed queries require all meaningful terms (AND conjunction)", () => {
-  // 'Astra' (creator) + '#gaming' (tag)
-  const results = searchEdits(sampleEdits, "Astra #gaming");
+  // 'Tomorrow' (title) + '#gaming' (tag)
+  const results = searchEdits(sampleEdits, "Tomorrow #gaming");
   assert.equal(results.length, 1);
   assert.equal(results[0].edit.id, 1);
 
-  // 'Lolixco' + '#gaming' -> Lolixco is not creator of edit 1
-  const none = searchEdits(sampleEdits, "Lolixco #gaming");
+  // 'Horizon' + '#gaming' -> Horizon is title of edit 3 (Movies), not edit 1 (Gaming)
+  const none = searchEdits(sampleEdits, "Horizon #gaming");
   assert.equal(none.length, 0);
+});
+
+test("Creator names are excluded from public search and never leak into query results", () => {
+  // 'Astra visual' is creator of edit 1, but not in its title, tags, or description
+  const astraResults = searchEdits(sampleEdits, "Astra");
+  assert.equal(astraResults.length, 0);
+
+  // 'Vuld0 studio' is creator of edit 3, but not in title or description
+  const vuld0Results = searchEdits(sampleEdits, "Vuld0");
+  assert.equal(vuld0Results.length, 0);
 });
 
 test("Relevance scoring and weight redistribution", () => {

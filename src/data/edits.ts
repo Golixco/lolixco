@@ -1,5 +1,7 @@
 import { mediaAssets, assetUrl } from "./media-assets.js";
 
+import type { ContentFormat } from "../types/content";
+
 export type Edit = {
   id: number;
   title: string;
@@ -11,6 +13,8 @@ export type Edit = {
   source: string;
   duration: string;
   trending: boolean;
+  format?: ContentFormat;
+  fandomIds?: string[];
 };
 const titles = [
   "Into the Light",
