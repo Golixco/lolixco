@@ -1705,8 +1705,11 @@ dialog .fine-print {
   z-index: 12;
   transition: height 0.15s ease;
 }
-.shorts-progress-bar:hover {
+.shorts-progress-bar:hover,
+.shorts-progress-bar:focus-visible {
   height: 6px;
+  outline: 2px solid var(--yellow);
+  outline-offset: 2px;
 }
 .shorts-progress-fill {
   height: 100%;

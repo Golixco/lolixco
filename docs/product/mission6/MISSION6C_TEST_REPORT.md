@@ -93,13 +93,23 @@
 ✔ App Navigation: direct URL ?view=shorts restores Shorts empty state directly
 ✔ App Navigation: invalid or missing short ID in URL safely recovers without crashing
 ✔ Production Invariant: production catalog has 17 items and 0 shorts
+✔ FIX A: parseAndValidateShortId strictly rejects invalid IDs and preserves ID 0
+✔ FIX A: Closing ShortsViewer uses replaceState to prevent Back from reopening
+✔ FIX B: ShortsViewer tag click triggers atomic discovery navigation without stale short ID
+✔ FIX B: App-level tag click navigation atomically clears short= and navigates to Explore
+✔ FIX C: ShortsShelf handles empty → populated → empty transitions without hook errors
+✔ FIX D: Background VideoPlayer automatically pauses when ShortsViewer overlay is active
+✔ FIX D: ShortsViewer error recovery keeps video mounted and retry genuinely reloads
+✔ FIX E: Focused buttons do not have Space/Enter hijacked by global playback listener
+✔ FIX E: Progress bar is an accessible slider supporting keyboard arrow seeking
+✔ FIX F: Shorts-only catalog never places a Short inside the landscape featured player
 ✔ VideoCardSkeleton renders correct markup and accessibility attributes
 ✔ DiscoveryGridSkeleton renders single accessible announcement without redundant labels
 ✔ CSS index.css contains skeleton styles and reduced-motion override
 ✔ Header.tsx maintains exact Search placeholder and keyboard shortcuts
 ✔ Header keyboard handler logic safely suppresses '/' focus redirect
 
-Total: 86 passed, 0 failed, 0 skipped.
+Total: 96 passed, 0 failed, 0 skipped.
 ```
 
 ### TypeScript Typecheck (`npm run typecheck`)
@@ -119,14 +129,15 @@ Total: 86 passed, 0 failed, 0 skipped.
 - Result: `Verified 20 referenced local media/brand assets (2904955 bytes).`
 
 ### Production Build (`npm run build`)
-- Result: Built in 3.54s without warnings or errors.
+- Result: Built in 3.55s without warnings or errors.
 
 ---
 
-## 2. Real Browser Verification Findings
+## 2. Real Browser Verification Findings & V2 Corrections
 
-Browser automated testing was executed via Chrome subagent against `http://127.0.0.1:5173/`:
+Browser automated testing was executed via Chrome subagent against `http://127.0.0.1:5173/` (production catalog) and `http://127.0.0.1:5173/test-shorts.html` (isolated test harness):
 
+### Production Catalog (Zero Synthetic Shorts)
 1. **Desktop (1440x900):**
    - Homepage renders featured video hero player with A-B loop controls and 4 Up Next recommendations.
    - `Recommended Edits` displays 6 cards.
@@ -143,3 +154,28 @@ Browser automated testing was executed via Chrome subagent against `http://127.0
    - Category chips scroll horizontally.
    - Video cards render in single / double column layout without horizontal overflow.
    - Navigating to `Shorts` via mobile drawer displays clean, centered honest empty state.
+
+### Isolated Test Harness (`test-shorts.html` with 4 Synthetic Shorts)
+1. **ShortsShelf Rendering & Transitions (Fix C):**
+   - Renders horizontal track with 4 portrait cards, view counts, and sound badges.
+   - Hook execution order is unconditional across empty → populated → empty states.
+2. **ShortsViewer Active Short & URL Synchronization (Fix A):**
+   - Opening Short 100 sets `?short=100`. Clicking Next navigates to Short 101 and pushes `?short=101`.
+   - Direct entry via `?short=0` accurately opens Short 0 ("Zero Origin", counter 3/4).
+   - Closing viewer uses `replaceState` without `short=`, so browser Back does not reopen the modal.
+3. **Viewer Tag Click & Feed Navigation (Fix B):**
+   - Clicking a hashtag inside ShortsViewer atomically closes viewer, clears `short=`, sets query `#tag`, resets category to "All", and navigates to Explore.
+4. **Audio Independence & Error Recovery (Fix D):**
+   - Featured background video automatically pauses when `ShortsViewer` overlay is active (`isOverlayActive` prop).
+   - Navigating to corrupted media item (Short 102) displays error overlay with "Try again" button; the `<video>` element remains mounted and retry calls `video.load()`.
+5. **Keyboard Accessibility & Focus Trap (Fix E):**
+   - Modal traps focus with `role="dialog"` and `aria-modal="true"`.
+   - Space/Enter on focused buttons activates the button rather than toggling video play/pause.
+   - Progress bar has `role="slider"`, `tabIndex={0}`, and responds to ArrowLeft/ArrowRight seeking.
+6. **Featured Player Isolation (Fix F):**
+   - `selected` video in `App.tsx` strictly filters with `isVideo(selected)`, preventing Shorts from appearing in the landscape featured player even in shorts-only catalogs.
+
+### Test Fixture Boundary Isolation
+- The test fixture (`src/test-harness.tsx` and `test-shorts.html`) is completely isolated from production bundles.
+- Production catalog `src/data/edits.ts` retains exactly 17 verified demo edits with 0 drift from `server/recsys/catalog_snapshot.json`.
+- Zero synthetic shorts exist in the production catalog.

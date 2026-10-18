@@ -16,7 +16,13 @@ const time = (n: number) =>
   `${Math.floor(n / 60)}:${Math.floor(n % 60)
     .toString()
     .padStart(2, "0")}`;
-export default function VideoPlayer({ edit }: { edit: Edit }) {
+export default function VideoPlayer({
+  edit,
+  isOverlayActive,
+}: {
+  edit: Edit;
+  isOverlayActive?: boolean;
+}) {
   const video = useRef<HTMLVideoElement>(null),
     container = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false),
@@ -71,6 +77,13 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
       v.removeEventListener("pause", stop);
     };
   }, []);
+
+  // Guarantee background video pauses when modal overlay is active (e.g. ShortsViewer)
+  useEffect(() => {
+    if (isOverlayActive && video.current) {
+      video.current.pause();
+    }
+  }, [isOverlayActive]);
   async function play() {
     try {
       await video.current!.play();

@@ -20,20 +20,25 @@ export function ShortsShelf({
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
-  // Invariant: Omit entirely when items are empty
-  if (!items || items.length === 0) {
-    return null;
-  }
-
   const checkScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el) {
+      setCanScrollLeft(false);
+      setCanScrollRight(false);
+      return;
+    }
     const { scrollLeft, scrollWidth, clientWidth } = el;
     setCanScrollLeft(scrollLeft > 2);
     setCanScrollRight(scrollLeft + clientWidth < scrollWidth - 2);
   }, []);
 
   useEffect(() => {
+    if (!items || items.length === 0) {
+      setCanScrollLeft(false);
+      setCanScrollRight(false);
+      return;
+    }
+
     checkScroll();
     const el = scrollRef.current;
     if (!el) return;
@@ -45,9 +50,9 @@ export function ShortsShelf({
       el.removeEventListener("scroll", checkScroll);
       window.removeEventListener("resize", checkScroll);
     };
-  }, [checkScroll, items.length]);
+  }, [checkScroll, items?.length]);
 
-  const scrollByAmount = (offset: number) => {
+  const scrollByAmount = useCallback((offset: number) => {
     const el = scrollRef.current;
     if (!el) return;
     const prefersReducedMotion =
@@ -58,7 +63,12 @@ export function ShortsShelf({
       left: offset,
       behavior: prefersReducedMotion ? "instant" : "smooth",
     });
-  };
+  }, []);
+
+  // Omit rendering entirely when items are empty
+  if (!items || items.length === 0) {
+    return null;
+  }
 
   return (
     <section className="shorts-shelf" aria-label={title}>

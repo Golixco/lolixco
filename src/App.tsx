@@ -20,6 +20,7 @@ import {
   composeHomeFeed,
   splitMixedResults,
   isShort,
+  isVideo,
 } from "./data/feedComposition";
 import { ShortsShelf } from "./components/shorts/ShortsShelf";
 import { ShortsViewer } from "./components/shorts/ShortsViewer";
@@ -27,7 +28,29 @@ import { useDiscoveryFeed } from "./hooks/useDiscoveryFeed";
 import { useRecommendations } from "./hooks/useRecommendations";
 import { Clapperboard } from "lucide-react";
 
-function parseUrlParams(): {
+/**
+ * Validates and safely parses short ID from URL query parameters.
+ * Rejects negative, fractional, unsafe, unknown, or non-short IDs.
+ * Preserves ID 0 as valid.
+ */
+export function parseAndValidateShortId(
+  rawShort: string | null,
+  catalog: Edit[]
+): number | null {
+  if (rawShort === null) return null;
+  const trimmed = rawShort.trim();
+  // Strictly reject negative, fractional, hex/scientific strings, or non-digits
+  if (!/^\d+$/.test(trimmed)) return null;
+
+  const num = Number(trimmed);
+  if (!Number.isSafeInteger(num)) return null;
+
+  // Must exist in catalog and be a Short format
+  const found = catalog.find((e) => e.id === num && isShort(e));
+  return found ? num : null;
+}
+
+export function parseUrlParams(catalog: Edit[] = edits): {
   category: string;
   fandom: string;
   query: string;
@@ -75,10 +98,7 @@ function parseUrlParams(): {
     normView = "Shorts";
   }
 
-  let shortId: number | null = null;
-  if (rawShort !== null && rawShort.trim() !== "" && !isNaN(Number(rawShort))) {
-    shortId = Number(rawShort);
-  }
+  const shortId = parseAndValidateShortId(rawShort, catalog);
 
   return {
     category: normCat,
@@ -89,7 +109,7 @@ function parseUrlParams(): {
   };
 }
 
-function syncUrl(
+export function syncUrl(
   cat: string,
   fan: string,
   q: string,
@@ -139,12 +159,18 @@ export default function App() {
   // Curated Shorts in the catalog
   const catalogShorts = useMemo(() => edits.filter((e) => isShort(e)), []);
 
+  // Guarantee that Shorts-only catalogs never place a Short into the landscape player
+  const initialLandscapeVideo = useMemo(
+    () => edits.find((e) => isVideo(e)) || null,
+    []
+  );
+
   // Initialize navigation state from URL query parameters
-  const initialParams = parseUrlParams();
+  const initialParams = parseUrlParams(edits);
   const [query, setQuery] = useState(initialParams.query);
   const [category, setCategory] = useState(initialParams.category);
   const [fandom, setFandom] = useState(initialParams.fandom);
-  const [selected, setSelected] = useState(edits[0]);
+  const [selected, setSelected] = useState<Edit | null>(initialLandscapeVideo);
   const [active, setActive] = useState(initialParams.view);
   const [activeShort, setActiveShort] = useState<Edit | null>(() => {
     if (typeof initialParams.shortId === "number") {
@@ -166,9 +192,9 @@ export default function App() {
     return () => mq.removeEventListener("change", change);
   }, []);
 
-  // Normalize initial URL if it contains direct fandom without category or incompatible params
+  // Normalize initial URL if it contains direct fandom without category or invalid short IDs
   useEffect(() => {
-    const current = parseUrlParams();
+    const current = parseUrlParams(edits);
     syncUrl(
       current.category,
       current.fandom,
@@ -188,7 +214,7 @@ export default function App() {
         query: q,
         view: v,
         shortId: sId,
-      } = parseUrlParams();
+      } = parseUrlParams(edits);
       setCategory(c);
       setFandom(f);
       setQuery(q);
@@ -214,9 +240,17 @@ export default function App() {
         : "";
       setCategory(normCat);
       setFandom(newFandom);
-      syncUrl(normCat, newFandom, query, active, activeShort?.id, true);
+
+      // On dedicated Shorts page with 0 shorts, user action navigates to Explore
+      const nextView =
+        active === "Shorts" && catalogShorts.length === 0 ? "Explore" : active;
+      if (nextView !== active) {
+        setActive(nextView);
+      }
+
+      syncUrl(normCat, newFandom, query, nextView, activeShort?.id, true);
     },
-    [active, activeShort?.id, fandom, query]
+    [active, activeShort?.id, catalogShorts.length, fandom, query]
   );
 
   const handleFandomChange = useCallback(
@@ -224,17 +258,35 @@ export default function App() {
       const cleanFandom =
         newFandomId === "all" ? "" : newFandomId.trim().toLowerCase();
       setFandom(cleanFandom);
-      syncUrl(category, cleanFandom, query, active, activeShort?.id, true);
+
+      // On dedicated Shorts page with 0 shorts, user action navigates to Explore
+      const nextView =
+        active === "Shorts" && catalogShorts.length === 0 ? "Explore" : active;
+      if (nextView !== active) {
+        setActive(nextView);
+      }
+
+      syncUrl(category, cleanFandom, query, nextView, activeShort?.id, true);
     },
-    [active, activeShort?.id, category, query]
+    [active, activeShort?.id, category, catalogShorts.length, query]
   );
 
   const handleQueryChange = useCallback(
     (newQuery: string) => {
       setQuery(newQuery);
-      syncUrl(category, fandom, newQuery, active, activeShort?.id, false);
+
+      // On dedicated Shorts page with 0 shorts, searching navigates to Explore
+      const nextView =
+        active === "Shorts" && catalogShorts.length === 0 && newQuery.trim()
+          ? "Explore"
+          : active;
+      if (nextView !== active) {
+        setActive(nextView);
+      }
+
+      syncUrl(category, fandom, newQuery, nextView, activeShort?.id, false);
     },
-    [active, activeShort?.id, category, fandom]
+    [active, activeShort?.id, category, catalogShorts.length, fandom]
   );
 
   const handleTagClick = useCallback(
@@ -244,6 +296,25 @@ export default function App() {
       syncUrl(category, fandom, tagQuery, active, activeShort?.id, true);
     },
     [active, activeShort?.id, category, fandom]
+  );
+
+  // Atomic hashtag navigation from within Shorts viewer
+  const handleShortsViewerTagClick = useCallback(
+    (tag: string) => {
+      // 1. Close the viewer
+      setActiveShort(null);
+      // 2. Prepare exact hashtag query: #tag
+      const tagQuery = "#" + tag.toLowerCase().trim();
+      setQuery(tagQuery);
+      // 3. Reset filters to avoid incompatible category/fandom
+      setCategory("All");
+      setFandom("");
+      // 4. Navigate to Explore surface
+      setActive("Explore");
+      // 5. Update URL clearing short= and syncing discovery query
+      syncUrl("All", "", tagQuery, "Explore", null, true);
+    },
+    []
   );
 
   const handleClearFilters = useCallback(() => {
@@ -266,17 +337,28 @@ export default function App() {
     [active, category, fandom, query]
   );
 
+  // Synchronize Next / Previous inside ShortsViewer with URL and activeShort
+  const handleShortChange = useCallback(
+    (newShort: Edit) => {
+      setActiveShort(newShort);
+      syncUrl(category, fandom, query, active, newShort.id, true);
+    },
+    [active, category, fandom, query]
+  );
+
   const handleCloseShort = useCallback(() => {
     setActiveShort(null);
     const nextView =
       active === "Shorts" && catalogShorts.length === 0 ? "Home" : active;
-    syncUrl(category, fandom, query, nextView, null, true);
     if (active === "Shorts" && catalogShorts.length === 0) {
       setActive("Home");
     }
+    // Use replaceState (usePush: false) on close so Back does not reopen viewer
+    syncUrl(category, fandom, query, nextView, null, false);
   }, [active, category, catalogShorts.length, fandom, query]);
 
   function choose(edit: Edit) {
+    if (!isVideo(edit)) return;
     setSelected(edit);
     window.scrollTo({
       top: 0,
@@ -329,7 +411,7 @@ export default function App() {
 
   const { edits: upNextEdits } = useRecommendations({
     surface: "up_next",
-    currentEditId: selected.id,
+    currentEditId: selected?.id ?? edits[0]?.id ?? 0,
     limit: 4,
   });
 
@@ -343,9 +425,9 @@ export default function App() {
       composeHomeFeed({
         recommendedVideos: homeRecommendedEdits,
         catalog: edits,
-        currentEditId: selected.id,
+        currentEditId: selected?.id ?? edits[0]?.id ?? 0,
       }),
-    [homeRecommendedEdits, selected.id]
+    [homeRecommendedEdits, selected?.id]
   );
 
   const { videos: searchVideos, shorts: searchShorts } = useMemo(
@@ -435,35 +517,62 @@ export default function App() {
           ) : (
             <div className="shorts-catalog-view">
               <div className="results-title">
-                <h1>Curated Shorts</h1>
-                <span>{catalogShorts.length} curated shorts</span>
+                <h1>
+                  {query
+                    ? `Shorts matching “${query}”`
+                    : fandom
+                      ? `${getFandomById(fandom)?.title || fandom} Shorts`
+                      : category !== "All"
+                        ? `${category} Shorts`
+                        : "Curated Shorts"}
+                </h1>
+                <span>{searchShorts.length} curated shorts</span>
               </div>
-              <ShortsShelf
-                title="Curated Shorts"
-                items={catalogShorts}
-                onSelect={handleSelectShort}
-                onTagClick={handleTagClick}
-              />
+              {searchShorts.length > 0 ? (
+                <ShortsShelf
+                  title={category !== "All" ? `${category} Shorts` : "Curated Shorts"}
+                  items={searchShorts}
+                  onSelect={handleSelectShort}
+                  onTagClick={handleTagClick}
+                />
+              ) : (
+                <div className="empty">
+                  <h2>No matching shorts</h2>
+                  <p>
+                    No shorts match your current category, fandom, or search
+                    filters.
+                  </p>
+                  <button type="button" onClick={handleClearFilters}>
+                    Clear filters
+                  </button>
+                </div>
+              )}
             </div>
           )
         ) : !browsing ? (
           <>
-            <div className="featured-row">
-              <VideoPlayer key={selected.id} edit={selected} />
-              <section className="up-next">
-                <h2>Up Next</h2>
-                {upNextEdits.map((e) => (
-                  <VideoCard
-                    key={e.id}
-                    compact
-                    edit={e}
-                    onSelect={choose}
-                    onSelectShort={handleSelectShort}
-                    onTagClick={handleTagClick}
-                  />
-                ))}
-              </section>
-            </div>
+            {selected && isVideo(selected) && (
+              <div className="featured-row">
+                <VideoPlayer
+                  key={selected.id}
+                  edit={selected}
+                  isOverlayActive={!!activeShort}
+                />
+                <section className="up-next">
+                  <h2>Up Next</h2>
+                  {upNextEdits.filter(isVideo).map((e) => (
+                    <VideoCard
+                      key={e.id}
+                      compact
+                      edit={e}
+                      onSelect={choose}
+                      onSelectShort={handleSelectShort}
+                      onTagClick={handleTagClick}
+                    />
+                  ))}
+                </section>
+              </div>
+            )}
 
             {homeSections.map((section, idx) => {
               if (section.type === "video_row") {
@@ -615,11 +724,12 @@ export default function App() {
               : [activeShort, ...catalogShorts]
           }
           initialShortId={activeShort.id}
+          activeShortId={activeShort.id}
+          onShortChange={handleShortChange}
           onClose={handleCloseShort}
-          onTagClick={handleTagClick}
+          onTagClick={handleShortsViewerTagClick}
         />
       )}
     </div>
   );
 }
-

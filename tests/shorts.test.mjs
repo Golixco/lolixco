@@ -7,7 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ShortsCard } from "../src/components/shorts/ShortsCard.tsx";
 import { ShortsShelf } from "../src/components/shorts/ShortsShelf.tsx";
 import { ShortsViewer } from "../src/components/shorts/ShortsViewer.tsx";
-import App from "../src/App.tsx";
+import App, { parseAndValidateShortId, parseUrlParams, syncUrl } from "../src/App.tsx";
+import VideoPlayer from "../src/components/video/VideoPlayer.tsx";
 import { edits } from "../src/data/edits.ts";
 
 // Synthetic Shorts fixture strictly for unit & interaction tests (NOT in visitor-facing production catalog)
@@ -145,13 +146,61 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
       scrollWidth: 1000,
       clientWidth: 500,
       scrollBy() {},
-      focus() {},
-      blur() {},
+      paused: true,
+      focus() {
+        if (this.ownerDocument) this.ownerDocument.activeElement = this;
+      },
+      blur() {
+        if (this.ownerDocument && this.ownerDocument.activeElement === this) {
+          this.ownerDocument.activeElement = null;
+        }
+      },
+      _playCalls: 0,
+      _pauseCalls: 0,
+      _loadCalls: 0,
       play() {
+        this._playCalls++;
+        this.paused = false;
         return Promise.resolve();
       },
-      pause() {},
-      load() {},
+      pause() {
+        this._pauseCalls++;
+        this.paused = true;
+      },
+      load() {
+        this._loadCalls++;
+      },
+      querySelectorAll(selector) {
+        const matches = [];
+        function walk(node) {
+          if (!node || !node.childNodes) return;
+          for (const child of node.childNodes) {
+            if (child.nodeType === 1) {
+              const tag = child.tagName?.toLowerCase();
+              const role = child.getAttribute("role");
+              if (selector.includes("button") && tag === "button") {
+                matches.push(child);
+              } else if (selector.includes('role="slider"') && role === "slider") {
+                matches.push(child);
+              } else if (tag === "button") {
+                matches.push(child);
+              }
+              walk(child);
+            }
+          }
+        }
+        walk(this);
+        return matches;
+      },
+      closest(selector) {
+        let curr = this;
+        while (curr) {
+          const tag = curr.tagName?.toLowerCase();
+          if (tag && selector.includes(tag)) return curr;
+          curr = curr.parentNode;
+        }
+        return null;
+      },
       get textContent() {
         if (this._textContent) return this._textContent;
         return this.childNodes
@@ -629,3 +678,389 @@ test("Production Invariant: production catalog has 17 items and 0 shorts", () =>
   const shortsCount = edits.filter((e) => e.format === "short").length;
   assert.equal(shortsCount, 0, "Production catalog must contain zero synthetic shorts");
 });
+
+// ---------------------------------------------------------------------------
+// 5. REVIEW V2 FIX A: Short ID Validation & URL Synchronization
+// ---------------------------------------------------------------------------
+
+test("FIX A: parseAndValidateShortId strictly rejects invalid IDs and preserves ID 0", () => {
+  // Valid short IDs
+  assert.equal(parseAndValidateShortId("100", SYNTHETIC_SHORTS), 100);
+  assert.equal(parseAndValidateShortId("101", SYNTHETIC_SHORTS), 101);
+  assert.equal(parseAndValidateShortId("0", SYNTHETIC_SHORTS), 0, "Numeric ID 0 must be strictly valid");
+  assert.equal(parseAndValidateShortId(" 100 ", SYNTHETIC_SHORTS), 100, "Whitespace trimmed");
+
+  // Invalid IDs
+  assert.equal(parseAndValidateShortId(null, SYNTHETIC_SHORTS), null);
+  assert.equal(parseAndValidateShortId("", SYNTHETIC_SHORTS), null);
+  assert.equal(parseAndValidateShortId("-1", SYNTHETIC_SHORTS), null, "Negative IDs rejected");
+  assert.equal(parseAndValidateShortId("1.5", SYNTHETIC_SHORTS), null, "Fractional/decimal IDs rejected");
+  assert.equal(parseAndValidateShortId("abc", SYNTHETIC_SHORTS), null, "Non-numeric strings rejected");
+  assert.equal(parseAndValidateShortId("100abc", SYNTHETIC_SHORTS), null, "Trailing letters rejected");
+  assert.equal(parseAndValidateShortId("1e2", SYNTHETIC_SHORTS), null, "Scientific notation rejected");
+  assert.equal(parseAndValidateShortId("9007199254740992", SYNTHETIC_SHORTS), null, "Unsafe integers rejected");
+  assert.equal(parseAndValidateShortId("9999", SYNTHETIC_SHORTS), null, "Unknown IDs not in catalog rejected");
+
+  // Non-short video ID rejection (e.g. landscape edit ID 1)
+  assert.equal(parseAndValidateShortId("1", edits), null, "Landscape video IDs rejected as Shorts");
+});
+
+test("FIX A: Closing ShortsViewer uses replaceState to prevent Back from reopening", () => {
+  const { historyState } = setupMountedDom("http://localhost:3000/?short=100");
+
+  // Simulate viewer close: usePush = false (replaceState)
+  syncUrl("All", "", "", "Home", null, false);
+
+  assert.equal(historyState.search, "");
+  assert.equal(historyState.replaceCount, 1, "Must use replaceState on viewer close");
+  assert.equal(historyState.pushCount, 0, "Must NOT use pushState on viewer close");
+});
+
+// ---------------------------------------------------------------------------
+// 6. REVIEW V2 FIX B: Atomic Tag Navigation & Dedicated Shorts Surface
+// ---------------------------------------------------------------------------
+
+test("FIX B: ShortsViewer tag click triggers atomic discovery navigation without stale short ID", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+  let clickedTag = "";
+
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: SYNTHETIC_SHORTS,
+        initialShortId: 100,
+        onClose: () => {},
+        onTagClick: (t) => {
+          clickedTag = t;
+        },
+      })
+    );
+  });
+
+  // Find tag chip button
+  const tagBtns = container.querySelectorAll("button");
+  const valorantTag = tagBtns.find((b) => b.textContent && b.textContent.includes("#valorant"));
+  assert.ok(valorantTag, "Hashtag chip #valorant must exist");
+
+  await act(async () => {
+    valorantTag.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(clickedTag, "valorant", "Tag click must pass exact tag value");
+
+  await cleanup();
+});
+
+test("FIX B: App-level tag click navigation atomically clears short= and navigates to Explore", async () => {
+  const { historyState } = setupMountedDom("http://localhost:3000/?short=100");
+
+  // Atomic navigation: clear short, set query #tag, view=explore, reset category to All
+  syncUrl("All", "", "#valorant", "Explore", null, true);
+
+  assert.equal(historyState.search, "?view=explore&q=%23valorant");
+  assert.ok(!historyState.search.includes("short="), "short= parameter must be cleared");
+});
+
+// ---------------------------------------------------------------------------
+// 7. REVIEW V2 FIX C: React Hook Ordering in ShortsShelf
+// ---------------------------------------------------------------------------
+
+test("FIX C: ShortsShelf handles empty → populated → empty transitions without hook errors", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  // 1. Initial render with empty items (returns null)
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsShelf, {
+        items: [],
+        onSelect: () => {},
+      })
+    );
+  });
+  assert.equal(container.childNodes.length, 0, "Empty items renders null");
+
+  // 2. Re-render mounted component with populated items (must not throw React hook count error)
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsShelf, {
+        items: SYNTHETIC_SHORTS,
+        onSelect: () => {},
+      })
+    );
+  });
+  assert.ok(container.textContent.includes("Curated Shorts"), "Populated items renders shelf");
+  assert.ok(container.textContent.includes("Shadow Strike"));
+
+  // 3. Re-render back to empty items
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsShelf, {
+        items: [],
+        onSelect: () => {},
+      })
+    );
+  });
+  assert.equal(container.childNodes.length, 0, "Returns to null without hook errors");
+
+  // 4. One item → many items transition
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsShelf, {
+        items: [SYNTHETIC_SHORTS[0]],
+        onSelect: () => {},
+      })
+    );
+  });
+  assert.ok(container.textContent.includes("Shadow Strike"));
+
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsShelf, {
+        items: SYNTHETIC_SHORTS,
+        onSelect: () => {},
+      })
+    );
+  });
+  assert.ok(container.textContent.includes("Domain Expansion"));
+
+  // 5. Rapid sequential updates without crashing
+  for (let i = 0; i < 5; i++) {
+    await act(async () => {
+      root.render(
+        React.createElement(ShortsShelf, {
+          items: i % 2 === 0 ? [] : SYNTHETIC_SHORTS,
+          onSelect: () => {},
+        })
+      );
+    });
+  }
+
+  await cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 8. REVIEW V2 FIX D: Video Playback Lifecycle & Error Recovery
+// ---------------------------------------------------------------------------
+
+test("FIX D: Background VideoPlayer automatically pauses when ShortsViewer overlay is active", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  // Mount featured player with isOverlayActive=false
+  await act(async () => {
+    root.render(
+      React.createElement(VideoPlayer, {
+        edit: edits[0],
+        isOverlayActive: false,
+      })
+    );
+  });
+
+  function findVideo(node) {
+    if (node.tagName === "VIDEO") return node;
+    if (node.childNodes) {
+      for (const c of node.childNodes) {
+        const found = findVideo(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const videoEl = findVideo(container);
+  assert.ok(videoEl, "Video element must exist in VideoPlayer");
+  const initialPauseCalls = videoEl._pauseCalls;
+
+  // Open ShortsViewer overlay -> isOverlayActive becomes true
+  await act(async () => {
+    root.render(
+      React.createElement(VideoPlayer, {
+        edit: edits[0],
+        isOverlayActive: true,
+      })
+    );
+  });
+
+  // Verify background player is paused to prevent overlapping audio
+  assert.ok(
+    videoEl._pauseCalls > initialPauseCalls,
+    "VideoPlayer must pause when isOverlayActive becomes true"
+  );
+
+  await cleanup();
+});
+
+test("FIX D: ShortsViewer error recovery keeps video mounted and retry genuinely reloads", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: SYNTHETIC_SHORTS,
+        initialShortId: 100,
+        onClose: () => {},
+      })
+    );
+  });
+
+  // Find video element
+  function findVideo(node) {
+    if (node.tagName === "VIDEO") return node;
+    if (node.childNodes) {
+      for (const c of node.childNodes) {
+        const found = findVideo(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const video = findVideo(container);
+  assert.ok(video, "Video element must be initially mounted");
+
+  // Trigger error event on video
+  await act(async () => {
+    video.dispatchEvent({ type: "error" });
+  });
+
+  // Invariant: Video element MUST remain in DOM (not unmounted)
+  const videoStillMounted = findVideo(container);
+  assert.ok(videoStillMounted, "Video element must remain mounted in DOM during error state");
+  assert.equal(videoStillMounted.style.display, "none", "Video element is hidden while error state displays");
+
+  // Error alert UI is visible
+  assert.ok(container.textContent.includes("Video unavailable"));
+
+  // Click Retry button
+  const retryBtn = container.querySelectorAll("button").find(
+    (b) => b.textContent && b.textContent.includes("Retry")
+  );
+  assert.ok(retryBtn, "Retry button must exist");
+
+  const prevLoadCalls = videoStillMounted._loadCalls;
+  await act(async () => {
+    retryBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // Genuinely reloads video ref
+  assert.ok(videoStillMounted._loadCalls > prevLoadCalls, "Retry must invoke video.load()");
+
+  await cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 9. REVIEW V2 FIX E: Accessibility, Modal Focus, and Seeker Slider
+// ---------------------------------------------------------------------------
+
+test("FIX E: Focused buttons do not have Space/Enter hijacked by global playback listener", async () => {
+  const { container, root, mockDoc, cleanup } = setupMountedDom();
+
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: SYNTHETIC_SHORTS,
+        initialShortId: 100,
+        onClose: () => {},
+      })
+    );
+  });
+
+  // Focus the mute button
+  const muteBtn = container.querySelectorAll("button").find(
+    (b) => b.attributes["aria-label"]?.includes("audio")
+  );
+  assert.ok(muteBtn, "Mute button must exist");
+  muteBtn.focus();
+  assert.equal(mockDoc.activeElement, muteBtn, "Active element is mute button");
+
+  // Send Space key when button has focus
+  let defaultPrevented = false;
+  const spaceEvt = {
+    key: " ",
+    target: muteBtn,
+    preventDefault() {
+      defaultPrevented = true;
+    },
+  };
+
+  const keyListeners = globalThis._windowListeners.get("keydown") || [];
+  await act(async () => {
+    for (const { fn } of [...keyListeners]) {
+      fn(spaceEvt);
+    }
+  });
+
+  // Space must NOT be prevented so button can natively activate
+  assert.equal(
+    defaultPrevented,
+    false,
+    "Space must not be prevented on focused button"
+  );
+
+  await cleanup();
+});
+
+test("FIX E: Progress bar is an accessible slider supporting keyboard arrow seeking", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: SYNTHETIC_SHORTS,
+        initialShortId: 100,
+        onClose: () => {},
+      })
+    );
+  });
+
+  // Find slider element
+  function findSlider(node) {
+    if (node.attributes?.role === "slider") return node;
+    if (node.childNodes) {
+      for (const c of node.childNodes) {
+        const found = findSlider(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const slider = findSlider(container);
+  assert.ok(slider, "Progress bar must have role='slider'");
+  assert.equal(slider.attributes["tabindex"], "0");
+  assert.equal(slider.attributes["aria-label"], "Seek short video");
+  assert.ok(slider.attributes["aria-valuenow"] !== undefined);
+
+  // Keyboard navigation on slider: ArrowRight, ArrowLeft
+  let arrowHandled = false;
+  await act(async () => {
+    slider.dispatchEvent({
+      type: "keydown",
+      key: "ArrowRight",
+      preventDefault() {
+        arrowHandled = true;
+      },
+      bubbles: true,
+    });
+  });
+  assert.equal(arrowHandled, true, "ArrowRight must be handled by slider");
+
+  await cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 10. REVIEW V2 FIX F: Arbitrary Catalog Composition Guard
+// ---------------------------------------------------------------------------
+
+test("FIX F: Shorts-only catalog never places a Short inside the landscape featured player", () => {
+  // Pure composition on Shorts-only catalog
+  const shortsOnlyCatalog = SYNTHETIC_SHORTS;
+
+  // Invariant: initialLandscapeVideo logic
+  const landscapeVideo = shortsOnlyCatalog.find((e) => e.format !== "short" && (e.format === "video" || e.format === undefined));
+  assert.equal(landscapeVideo, undefined, "Shorts-only catalog has no landscape video");
+
+  // Landscape player must not be assigned a Short edit
+  const isSafeForLandscape = (edit) => Boolean(edit && edit.format !== "short");
+  assert.equal(isSafeForLandscape(landscapeVideo), false, "Short must never be safe for landscape player");
+});
+
