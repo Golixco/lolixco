@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import Header from "./components/layout/Header";
 import Sidebar from "./components/layout/Sidebar";
 import Dialog from "./components/ui/Dialog";
@@ -16,23 +16,56 @@ import {
   isFandomCompatibleWithCategory,
   getFandomById,
 } from "./data/fandoms";
+import {
+  composeHomeFeed,
+  splitMixedResults,
+  isShort,
+  isVideo,
+} from "./data/feedComposition";
+import { ShortsShelf } from "./components/shorts/ShortsShelf";
+import { ShortsViewer } from "./components/shorts/ShortsViewer";
 import { useDiscoveryFeed } from "./hooks/useDiscoveryFeed";
 import { useRecommendations } from "./hooks/useRecommendations";
+import { Clapperboard } from "lucide-react";
 
-function parseUrlParams(): {
+/**
+ * Validates and safely parses short ID from URL query parameters.
+ * Rejects negative, fractional, unsafe, unknown, or non-short IDs.
+ * Preserves ID 0 as valid.
+ */
+export function parseAndValidateShortId(
+  rawShort: string | null,
+  catalog: Edit[]
+): number | null {
+  if (rawShort === null) return null;
+  const trimmed = rawShort.trim();
+  // Strictly reject negative, fractional, hex/scientific strings, or non-digits
+  if (!/^\d+$/.test(trimmed)) return null;
+
+  const num = Number(trimmed);
+  if (!Number.isSafeInteger(num)) return null;
+
+  // Must exist in catalog and be a Short format
+  const found = catalog.find((e) => e.id === num && isShort(e));
+  return found ? num : null;
+}
+
+export function parseUrlParams(catalog: Edit[] = edits): {
   category: string;
   fandom: string;
   query: string;
   view: string;
+  shortId: number | null;
 } {
   if (typeof window === "undefined") {
-    return { category: "All", fandom: "", query: "", view: "Home" };
+    return { category: "All", fandom: "", query: "", view: "Home", shortId: null };
   }
   const params = new URLSearchParams(window.location.search);
   const rawCat = params.get("category") || params.get("cat") || "";
   const rawFandom = params.get("fandom") || "";
   const rawQ = params.get("q") || params.get("query") || "";
   const rawView = params.get("view") || "";
+  const rawShort = params.get("short");
 
   let normCat = normalizeCategoryCase(rawCat);
   const fandomMeta = rawFandom ? getFandomById(rawFandom.trim()) : undefined;
@@ -58,28 +91,43 @@ function parseUrlParams(): {
     normCat = "All";
   }
 
-  const normView = rawView.toLowerCase() === "explore" ? "Explore" : "Home";
+  let normView = "Home";
+  if (rawView.toLowerCase() === "explore") {
+    normView = "Explore";
+  } else if (rawView.toLowerCase() === "shorts") {
+    normView = "Shorts";
+  }
+
+  const shortId = parseAndValidateShortId(rawShort, catalog);
 
   return {
     category: normCat,
     fandom: normFandom,
     query: rawQ.trim(),
     view: normView,
+    shortId,
   };
 }
 
-function syncUrl(
+export function syncUrl(
   cat: string,
   fan: string,
   q: string,
   view: string,
-  usePush: boolean
+  shortId: number | null | undefined,
+  usePush: boolean,
+  stateUpdate?: Record<string, unknown> | null
 ) {
   if (typeof window === "undefined") return;
 
   const params = new URLSearchParams();
   if (view && view.toLowerCase() === "explore") {
     params.set("view", "explore");
+  } else if (view && view.toLowerCase() === "shorts") {
+    params.set("view", "shorts");
+  }
+  if (typeof shortId === "number") {
+    params.set("short", String(shortId));
   }
   if (cat && cat !== "All" && cat !== "Featured") {
     params.set("category", cat);
@@ -94,29 +142,110 @@ function syncUrl(
   const newSearch = params.toString() ? `?${params.toString()}` : "";
   const currentSearch = window.location.search;
 
-  if (newSearch === currentSearch) return;
+  const existingState: Record<string, unknown> =
+    window.history?.state && typeof window.history.state === "object"
+      ? { ...window.history.state }
+      : {};
+
+  let nextState: Record<string, unknown> | null = null;
+  if (stateUpdate === null || (shortId === null && stateUpdate === undefined)) {
+    const cleaned = { ...existingState };
+    delete cleaned.viewerSessionId;
+    delete cleaned.viewerDepth;
+    delete cleaned.hasInAppOrigin;
+    nextState = Object.keys(cleaned).length > 0 ? cleaned : null;
+  } else if (stateUpdate !== undefined) {
+    nextState = { ...existingState, ...stateUpdate };
+  } else {
+    nextState = Object.keys(existingState).length > 0 ? existingState : null;
+  }
+
+  if (newSearch === currentSearch) {
+    if (!usePush && stateUpdate !== undefined && window.history?.replaceState) {
+      window.history.replaceState(
+        nextState,
+        "",
+        window.location.pathname + newSearch + window.location.hash
+      );
+    }
+    return;
+  }
 
   const targetUrl = window.location.pathname + newSearch + window.location.hash;
   if (usePush) {
-    window.history.pushState(null, "", targetUrl);
+    window.history.pushState(nextState, "", targetUrl);
   } else {
-    window.history.replaceState(null, "", targetUrl);
+    window.history.replaceState(nextState, "", targetUrl);
   }
 }
 
-export default function App() {
+export default function App({
+  initialEdits = edits,
+}: {
+  initialEdits?: Edit[];
+} = {}) {
   const [expanded, setExpanded] = useState(() => innerWidth >= 1440);
   const [mobile, setMobile] = useState(() => innerWidth < 768);
   const [drawer, setDrawer] = useState(false);
 
+  // Curated Shorts in the catalog
+  const catalogShorts = useMemo(
+    () => initialEdits.filter((e) => isShort(e)),
+    [initialEdits]
+  );
+
+  // Guarantee that Shorts-only catalogs never place a Short into the landscape player
+  const initialLandscapeVideo = useMemo(
+    () => initialEdits.find((e) => isVideo(e)) || null,
+    [initialEdits]
+  );
+
   // Initialize navigation state from URL query parameters
-  const initialParams = parseUrlParams();
+  const initialParams = parseUrlParams(initialEdits);
   const [query, setQuery] = useState(initialParams.query);
   const [category, setCategory] = useState(initialParams.category);
   const [fandom, setFandom] = useState(initialParams.fandom);
-  const [selected, setSelected] = useState(edits[0]);
+  const [selected, setSelected] = useState<Edit | null>(initialLandscapeVideo);
   const [active, setActive] = useState(initialParams.view);
+  const [activeShort, setActiveShort] = useState<Edit | null>(() => {
+    if (typeof initialParams.shortId === "number") {
+      return (
+        initialEdits.find(
+          (e) => e.id === initialParams.shortId && isShort(e)
+        ) || null
+      );
+    }
+    return null;
+  });
   const [modal, setModal] = useState("");
+
+  // Active viewer session identifier and monotonic session counter.
+  // Restore existing application-owned viewer session on refresh if URL has a valid Short
+  // and history.state has a recognized session identifier and positive safe integer depth.
+  const initialViewerSessionId = (() => {
+    if (typeof window === "undefined") return null;
+    if (typeof initialParams.shortId !== "number") return null;
+    const isInitialShortValid = initialEdits.some(
+      (e) => e.id === initialParams.shortId && isShort(e)
+    );
+    if (!isInitialShortValid) return null;
+
+    const navState = window.history?.state;
+    if (
+      navState &&
+      typeof navState.viewerSessionId === "string" &&
+      navState.viewerSessionId.trim() &&
+      typeof navState.viewerDepth === "number" &&
+      Number.isSafeInteger(navState.viewerDepth) &&
+      navState.viewerDepth > 0
+    ) {
+      return navState.viewerSessionId;
+    }
+    return null;
+  })();
+
+  const viewerSessionIdRef = useRef<string | null>(initialViewerSessionId);
+  const sessionCounterRef = useRef<number>(0);
 
   useEffect(() => {
     const mq = matchMedia("(max-width:767px)");
@@ -128,25 +257,58 @@ export default function App() {
     return () => mq.removeEventListener("change", change);
   }, []);
 
-  // Normalize initial URL if it contains direct fandom without category or incompatible params
+  // Normalize initial URL if it contains direct fandom without category or invalid short IDs
   useEffect(() => {
-    const current = parseUrlParams();
-    syncUrl(current.category, current.fandom, current.query, current.view, false);
-  }, []);
+    const current = parseUrlParams(initialEdits);
+    syncUrl(
+      current.category,
+      current.fandom,
+      current.query,
+      current.view,
+      current.shortId,
+      false
+    );
+  }, [initialEdits]);
 
   // Synchronize browser history navigation (Back / Forward)
   useEffect(() => {
-    function handlePopState() {
-      const { category: c, fandom: f, query: q, view: v } = parseUrlParams();
+    function handlePopState(e: PopStateEvent) {
+      const {
+        category: c,
+        fandom: f,
+        query: q,
+        view: v,
+        shortId: sId,
+      } = parseUrlParams(initialEdits);
       setCategory(c);
       setFandom(f);
       setQuery(q);
       setActive(v);
+
+      const navState =
+        (e && e.state) ||
+        (typeof window !== "undefined" ? window.history?.state : null);
+      const destSessionId =
+        navState && typeof navState.viewerSessionId === "string"
+          ? navState.viewerSessionId
+          : null;
+
+      if (typeof sId === "number") {
+        const matchingShort =
+          initialEdits.find((e) => e.id === sId && isShort(e)) || null;
+        setActiveShort(matchingShort);
+        // Track the destination entry's viewer session if tagged
+        viewerSessionIdRef.current = destSessionId;
+      } else {
+        // Destination entry is not a short (viewer closed via popstate)
+        setActiveShort(null);
+        viewerSessionIdRef.current = null;
+      }
     }
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [initialEdits]);
 
   const handleCategoryChange = useCallback(
     (newCat: string) => {
@@ -156,9 +318,17 @@ export default function App() {
         : "";
       setCategory(normCat);
       setFandom(newFandom);
-      syncUrl(normCat, newFandom, query, active, true);
+
+      // On dedicated Shorts page with 0 shorts, user action navigates to Explore
+      const nextView =
+        active === "Shorts" && catalogShorts.length === 0 ? "Explore" : active;
+      if (nextView !== active) {
+        setActive(nextView);
+      }
+
+      syncUrl(normCat, newFandom, query, nextView, activeShort?.id, true);
     },
-    [active, fandom, query]
+    [active, activeShort?.id, catalogShorts.length, fandom, query]
   );
 
   const handleFandomChange = useCallback(
@@ -166,41 +336,168 @@ export default function App() {
       const cleanFandom =
         newFandomId === "all" ? "" : newFandomId.trim().toLowerCase();
       setFandom(cleanFandom);
-      syncUrl(category, cleanFandom, query, active, true);
+
+      // On dedicated Shorts page with 0 shorts, user action navigates to Explore
+      const nextView =
+        active === "Shorts" && catalogShorts.length === 0 ? "Explore" : active;
+      if (nextView !== active) {
+        setActive(nextView);
+      }
+
+      syncUrl(category, cleanFandom, query, nextView, activeShort?.id, true);
     },
-    [active, category, query]
+    [active, activeShort?.id, category, catalogShorts.length, query]
   );
 
   const handleQueryChange = useCallback(
     (newQuery: string) => {
       setQuery(newQuery);
-      syncUrl(category, fandom, newQuery, active, false);
+
+      // On dedicated Shorts page with 0 shorts, searching navigates to Explore
+      const nextView =
+        active === "Shorts" && catalogShorts.length === 0 && newQuery.trim()
+          ? "Explore"
+          : active;
+      if (nextView !== active) {
+        setActive(nextView);
+      }
+
+      syncUrl(category, fandom, newQuery, nextView, activeShort?.id, false);
     },
-    [active, category, fandom]
+    [active, activeShort?.id, category, catalogShorts.length, fandom]
   );
 
   const handleTagClick = useCallback(
     (tag: string) => {
       const tagQuery = "#" + tag.toLowerCase().trim();
       setQuery(tagQuery);
-      syncUrl(category, fandom, tagQuery, active, true);
+      syncUrl(category, fandom, tagQuery, active, activeShort?.id, true);
     },
-    [active, category, fandom]
+    [active, activeShort?.id, category, fandom]
+  );
+
+  // Atomic hashtag navigation from within Shorts viewer
+  const handleShortsViewerTagClick = useCallback(
+    (tag: string) => {
+      // 1. Close the viewer and clear session tracking
+      viewerSessionIdRef.current = null;
+      setActiveShort(null);
+      // 2. Prepare exact hashtag query: #tag
+      const tagQuery = "#" + tag.toLowerCase().trim();
+      setQuery(tagQuery);
+      // 3. Reset filters to avoid incompatible category/fandom
+      setCategory("All");
+      setFandom("");
+      // 4. Navigate to Explore surface
+      setActive("Explore");
+      // 5. Update URL clearing short= and syncing discovery query with cleared session state
+      syncUrl("All", "", tagQuery, "Explore", null, true, null);
+    },
+    []
   );
 
   const handleClearFilters = useCallback(() => {
     setCategory("All");
     setFandom("");
     setQuery("");
-    syncUrl("All", "", "", active, true);
+    syncUrl("All", "", "", active, null, true);
   }, [active]);
 
   const handleClearFandom = useCallback(() => {
     setFandom("");
-    syncUrl(category, "", query, active, true);
-  }, [active, category, query]);
+    syncUrl(category, "", query, active, activeShort?.id, true);
+  }, [active, activeShort?.id, category, query]);
+
+  const handleSelectShort = useCallback(
+    (short: Edit) => {
+      const newSessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+      viewerSessionIdRef.current = newSessionId;
+      setActiveShort(short);
+      syncUrl(category, fandom, query, active, short.id, true, {
+        viewerSessionId: newSessionId,
+        viewerDepth: 1,
+        hasInAppOrigin: true,
+      });
+    },
+    [active, category, fandom, query]
+  );
+
+  // Synchronize Next / Previous inside ShortsViewer with URL and activeShort
+  const handleShortChange = useCallback(
+    (newShort: Edit) => {
+      const curState =
+        typeof window !== "undefined" ? window.history?.state : null;
+      const hasInAppOrigin = Boolean(
+        curState && curState.hasInAppOrigin === true
+      );
+
+      let sessionId = viewerSessionIdRef.current;
+      const isExistingSession = Boolean(
+        sessionId &&
+        curState &&
+        curState.viewerSessionId === sessionId &&
+        typeof curState.viewerDepth === "number"
+      );
+
+      if (!sessionId || !isExistingSession) {
+        sessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+        viewerSessionIdRef.current = sessionId;
+      }
+
+      const curDepth = isExistingSession
+        ? (curState!.viewerDepth as number)
+        : (hasInAppOrigin ? 1 : 0);
+      const nextDepth = curDepth + 1;
+
+      setActiveShort(newShort);
+      syncUrl(category, fandom, query, active, newShort.id, true, {
+        viewerSessionId: sessionId,
+        viewerDepth: nextDepth,
+        hasInAppOrigin,
+      });
+    },
+    [active, category, fandom, query]
+  );
+
+  const handleCloseShort = useCallback(() => {
+    setActiveShort(null);
+    const nextView =
+      active === "Shorts" && catalogShorts.length === 0 ? "Home" : active;
+    if (active === "Shorts" && catalogShorts.length === 0) {
+      setActive("Home");
+    }
+
+    const curState =
+      typeof window !== "undefined" ? window.history?.state : null;
+    const hasInAppOrigin = Boolean(
+      curState && curState.hasInAppOrigin === true
+    );
+    const isAppSession =
+      viewerSessionIdRef.current &&
+      curState &&
+      curState.viewerSessionId === viewerSessionIdRef.current &&
+      typeof curState.viewerDepth === "number" &&
+      curState.viewerDepth > 0;
+
+    if (isAppSession && hasInAppOrigin) {
+      const depthToGo = curState.viewerDepth;
+      viewerSessionIdRef.current = null;
+      if (
+        typeof window !== "undefined" &&
+        typeof window.history?.go === "function"
+      ) {
+        window.history.go(-depthToGo);
+      } else {
+        syncUrl(category, fandom, query, nextView, null, false, null);
+      }
+    } else {
+      viewerSessionIdRef.current = null;
+      syncUrl(category, fandom, query, nextView, null, false, null);
+    }
+  }, [active, category, catalogShorts.length, fandom, query]);
 
   function choose(edit: Edit) {
+    if (!isVideo(edit)) return;
     setSelected(edit);
     window.scrollTo({
       top: 0,
@@ -214,38 +511,82 @@ export default function App() {
     setDrawer(false);
     if (name === "Home") {
       setActive("Home");
+      setActiveShort(null);
+      viewerSessionIdRef.current = null;
       setQuery("");
       setCategory("All");
       setFandom("");
-      syncUrl("All", "", "", "Home", true);
+      syncUrl("All", "", "", "Home", null, true);
     } else if (name === "Explore") {
       setActive("Explore");
+      setActiveShort(null);
+      viewerSessionIdRef.current = null;
       setQuery("");
       setCategory("All");
       setFandom("");
-      syncUrl("All", "", "", "Explore", true);
+      syncUrl("All", "", "", "Explore", null, true);
+    } else if (name === "Shorts") {
+      setActive("Shorts");
+      setQuery("");
+      setCategory("All");
+      setFandom("");
+      if (catalogShorts.length > 0) {
+        const firstShort = catalogShorts[0];
+        const newSessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+        viewerSessionIdRef.current = newSessionId;
+        setActiveShort(firstShort);
+        syncUrl("All", "", "", "Shorts", firstShort.id, true, {
+          viewerSessionId: newSessionId,
+          viewerDepth: 1,
+          hasInAppOrigin: true,
+        });
+      } else {
+        setActiveShort(null);
+        viewerSessionIdRef.current = null;
+        syncUrl("All", "", "", "Shorts", null, true, null);
+      }
     } else {
       setModal(name);
     }
   }
 
   const { edits: filtered, loading } = useDiscoveryFeed(
-    edits,
+    initialEdits,
     query,
     category,
     fandom
   );
 
-  const { edits: upNextEdits } = useRecommendations({
-    surface: "up_next",
-    currentEditId: selected.id,
-    limit: 4,
-  });
+  const isUpNextEnabled = selected !== null && isVideo(selected);
+
+  const { edits: upNextEdits } = useRecommendations(
+    {
+      surface: "up_next",
+      currentEditId: selected ? selected.id : undefined,
+      limit: 4,
+    },
+    isUpNextEnabled
+  );
 
   const { edits: homeRecommendedEdits } = useRecommendations({
     surface: "home",
     limit: 6,
   });
+
+  const homeSections = useMemo(
+    () =>
+      composeHomeFeed({
+        recommendedVideos: homeRecommendedEdits,
+        catalog: initialEdits,
+        currentEditId: selected?.id ?? null,
+      }),
+    [homeRecommendedEdits, initialEdits, selected?.id]
+  );
+
+  const { videos: searchVideos, shorts: searchShorts } = useMemo(
+    () => splitMixedResults(filtered),
+    [filtered]
+  );
 
   const browsing =
     !!query ||
@@ -253,11 +594,39 @@ export default function App() {
     !!fandom ||
     active === "Explore";
 
+  const homeShelfShorts = useMemo(() => {
+    const shelf = homeSections.find((s) => s.type === "shorts_shelf");
+    return shelf ? shelf.items : [];
+  }, [homeSections]);
+
+  // Compute eligible Shorts queue reflecting current view, category, fandom, and search filters
+  const eligibleShorts = useMemo(() => {
+    let baseQueue: Edit[];
+    if (active === "Shorts" || browsing || active === "Explore") {
+      baseQueue = searchShorts;
+    } else {
+      baseQueue =
+        homeShelfShorts.length > 0 ? homeShelfShorts : catalogShorts;
+    }
+
+    if (activeShort && !baseQueue.some((s) => s.id === activeShort.id)) {
+      return [activeShort, ...baseQueue];
+    }
+    return baseQueue.length > 0 ? baseQueue : activeShort ? [activeShort] : [];
+  }, [
+    active,
+    activeShort,
+    browsing,
+    catalogShorts,
+    homeShelfShorts,
+    searchShorts,
+  ]);
+
   const messages: Record<string, string> = {
     Immersion:
       "Immersion Mode is planned. Adaptive ambience, continuous playback, and personal playback queue are not implemented in this homepage preview.",
     Shorts:
-      "Shorts is planned as a dedicated portrait-video experience with a vertical player. This preview currently supports standard landscape edits.",
+      "Curated Shorts is planned as a dedicated portrait-video experience with a vertical player. This preview currently supports standard landscape edits.",
     "Creator Studio":
       "Creator Studio is planned for temporary in-browser AI video analysis. No uploads, login, or public analytics are active in this demo.",
     Settings:
@@ -298,42 +667,124 @@ export default function App() {
           fandomId={fandom}
           onSelectFandom={handleFandomChange}
         />
-        {!browsing ? (
+        {active === "Shorts" ? (
+          catalogShorts.length === 0 ? (
+            <div
+              className="shorts-empty-state"
+              role="region"
+              aria-label="Curated Shorts"
+            >
+              <div className="shorts-empty-icon-wrap">
+                <Clapperboard
+                  size={44}
+                  className="shorts-empty-icon"
+                  aria-hidden="true"
+                />
+              </div>
+              <h1>Curated Shorts are coming soon</h1>
+              <p>
+                We are currently curating genuine vertical edits across our
+                fandoms. In the meantime, explore our cinematic landscape
+                edits.
+              </p>
+              <button
+                type="button"
+                className="return-browsing-btn"
+                onClick={() => navigate("Home")}
+              >
+                Return to browsing
+              </button>
+            </div>
+          ) : (
+            <div className="shorts-catalog-view">
+              <div className="results-title">
+                <h1>
+                  {query
+                    ? `Shorts matching “${query}”`
+                    : fandom
+                      ? `${getFandomById(fandom)?.title || fandom} Shorts`
+                      : category !== "All"
+                        ? `${category} Shorts`
+                        : "Curated Shorts"}
+                </h1>
+                <span>{searchShorts.length} curated shorts</span>
+              </div>
+              {searchShorts.length > 0 ? (
+                <ShortsShelf
+                  title={category !== "All" ? `${category} Shorts` : "Curated Shorts"}
+                  items={searchShorts}
+                  onSelect={handleSelectShort}
+                  onTagClick={handleTagClick}
+                />
+              ) : (
+                <div className="empty">
+                  <h2>No matching shorts</h2>
+                  <p>
+                    No shorts match your current category, fandom, or search
+                    filters.
+                  </p>
+                  <button type="button" onClick={handleClearFilters}>
+                    Clear filters
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        ) : !browsing ? (
           <>
-            <div className="featured-row">
-              <VideoPlayer key={selected.id} edit={selected} />
-              <section className="up-next">
-                <h2>Up Next</h2>
-                {upNextEdits.map((e) => (
-                  <VideoCard
-                    key={e.id}
-                    compact
-                    edit={e}
-                    onSelect={choose}
+            {selected && isVideo(selected) && (
+              <div className="featured-row">
+                <VideoPlayer
+                  key={selected.id}
+                  edit={selected}
+                  isOverlayActive={!!activeShort}
+                />
+                <section className="up-next">
+                  <h2>Up Next</h2>
+                  {upNextEdits.filter(isVideo).map((e) => (
+                    <VideoCard
+                      key={e.id}
+                      compact
+                      edit={e}
+                      onSelect={choose}
+                      onSelectShort={handleSelectShort}
+                      onTagClick={handleTagClick}
+                    />
+                  ))}
+                </section>
+              </div>
+            )}
+
+            {homeSections.map((section, idx) => {
+              if (section.type === "video_row") {
+                return (
+                  <div key={section.id}>
+                    <ContentSection
+                      title={section.title}
+                      items={section.items}
+                      onSelect={choose}
+                      onSelectShort={handleSelectShort}
+                      onTagClick={handleTagClick}
+                    />
+                    {idx === 0 && (
+                      <ImmersionBanner onOpen={() => setModal("Immersion")} />
+                    )}
+                  </div>
+                );
+              }
+              if (section.type === "shorts_shelf") {
+                return (
+                  <ShortsShelf
+                    key={section.id}
+                    title={section.title}
+                    items={section.items}
+                    onSelect={handleSelectShort}
                     onTagClick={handleTagClick}
                   />
-                ))}
-              </section>
-            </div>
-            <ContentSection
-              title="Recommended Edits"
-              items={homeRecommendedEdits}
-              onSelect={choose}
-              onTagClick={handleTagClick}
-            />
-            <ImmersionBanner onOpen={() => setModal("Immersion")} />
-            <ContentSection
-              title="Curated Demo Selection"
-              items={edits.slice(11)}
-              onSelect={choose}
-              onTagClick={handleTagClick}
-            />
-            <ContentSection
-              title="More to Discover"
-              items={edits.slice(1, 5)}
-              onSelect={choose}
-              onTagClick={handleTagClick}
-            />
+                );
+              }
+              return null;
+            })}
           </>
         ) : (
           <>
@@ -355,19 +806,34 @@ export default function App() {
                 label="Loading discovery edits..."
               />
             ) : filtered.length ? (
-              <ContentSection
-                title="Discover"
-                items={filtered}
-                onSelect={(e) => {
-                  choose(e);
-                  setQuery("");
-                  setCategory("All");
-                  setFandom("");
-                  setActive("Home");
-                  syncUrl("All", "", "", "Home", true);
-                }}
-                onTagClick={handleTagClick}
-              />
+              <>
+                {searchShorts.length > 0 && (
+                  <ShortsShelf
+                    title={query ? "Matching Shorts" : "Curated Shorts"}
+                    items={searchShorts}
+                    onSelect={handleSelectShort}
+                    onTagClick={handleTagClick}
+                  />
+                )}
+                {searchVideos.length > 0 && (
+                  <ContentSection
+                    title={
+                      searchShorts.length > 0 ? "Landscape Edits" : "Discover"
+                    }
+                    items={searchVideos}
+                    onSelect={(e) => {
+                      choose(e);
+                      setQuery("");
+                      setCategory("All");
+                      setFandom("");
+                      setActive("Home");
+                      syncUrl("All", "", "", "Home", null, true);
+                    }}
+                    onSelectShort={handleSelectShort}
+                    onTagClick={handleTagClick}
+                  />
+                )}
+              </>
             ) : (
               <div className="empty">
                 {fandom ? (
@@ -430,6 +896,16 @@ export default function App() {
             Back to browsing
           </button>
         </Dialog>
+      )}
+      {activeShort && (
+        <ShortsViewer
+          shorts={eligibleShorts}
+          initialShortId={activeShort.id}
+          activeShortId={activeShort.id}
+          onShortChange={handleShortChange}
+          onClose={handleCloseShort}
+          onTagClick={handleShortsViewerTagClick}
+        />
       )}
     </div>
   );

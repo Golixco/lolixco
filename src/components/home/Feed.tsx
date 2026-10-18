@@ -8,6 +8,7 @@ export { CategoryBar } from "./CategoryBar";
 export interface VideoCardProps {
   edit: Edit;
   onSelect: (e: Edit) => void;
+  onSelectShort?: (short: Edit) => void;
   onTagClick?: (tag: string) => void;
   compact?: boolean;
 }
@@ -15,10 +16,19 @@ export interface VideoCardProps {
 export function VideoCard({
   edit,
   onSelect,
+  onSelectShort,
   onTagClick,
   compact = false,
 }: VideoCardProps) {
   const [failedPoster, setFailedPoster] = useState<string | null>(null);
+
+  const handleClick = () => {
+    if (edit.format === "short" && onSelectShort) {
+      onSelectShort(edit);
+    } else {
+      onSelect(edit);
+    }
+  };
 
   return (
     <article
@@ -28,7 +38,7 @@ export function VideoCard({
       <button
         type="button"
         className="card-watch-trigger"
-        onClick={() => onSelect(edit)}
+        onClick={handleClick}
         aria-label={`Watch ${edit.title}`}
       >
         <div className="thumbnail">
@@ -48,6 +58,9 @@ export function VideoCard({
               alt=""
               onError={() => setFailedPoster(edit.poster)}
             />
+          )}
+          {edit.format === "short" && (
+            <span className="shorts-badge">Short</span>
           )}
           <span className="duration">{edit.duration}</span>
         </div>
@@ -87,11 +100,13 @@ export function ContentSection({
   title,
   items,
   onSelect,
+  onSelectShort,
   onTagClick,
 }: {
   title: string;
   items: Edit[];
   onSelect: (e: Edit) => void;
+  onSelectShort?: (short: Edit) => void;
   onTagClick?: (tag: string) => void;
 }) {
   return (
@@ -103,6 +118,7 @@ export function ContentSection({
             key={edit.id}
             edit={edit}
             onSelect={onSelect}
+            onSelectShort={onSelectShort}
             onTagClick={onTagClick}
           />
         ))}

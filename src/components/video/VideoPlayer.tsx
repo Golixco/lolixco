@@ -16,7 +16,13 @@ const time = (n: number) =>
   `${Math.floor(n / 60)}:${Math.floor(n % 60)
     .toString()
     .padStart(2, "0")}`;
-export default function VideoPlayer({ edit }: { edit: Edit }) {
+export default function VideoPlayer({
+  edit,
+  isOverlayActive,
+}: {
+  edit: Edit;
+  isOverlayActive?: boolean;
+}) {
   const video = useRef<HTMLVideoElement>(null),
     container = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false),
@@ -35,6 +41,9 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
   const state = useRef({ a, b, loop });
   state.current = { a, b, loop };
   const valid = a !== null && b !== null && validLoop(a, b, duration);
+  const overlayActiveRef = useRef(!!isOverlayActive);
+  const playRequestId = useRef(0);
+
   useEffect(() => {
     const v = video.current!;
     let frame = 0;
@@ -71,14 +80,35 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
       v.removeEventListener("pause", stop);
     };
   }, []);
+
+  // Guarantee background video pauses when modal overlay is active (e.g. ShortsViewer)
+  useEffect(() => {
+    overlayActiveRef.current = !!isOverlayActive;
+    if (isOverlayActive) {
+      playRequestId.current++;
+      if (video.current) {
+        video.current.pause();
+      }
+      setPlaying(false);
+    }
+  }, [isOverlayActive]);
+
   async function play() {
+    if (isOverlayActive || overlayActiveRef.current) return;
+    const req = ++playRequestId.current;
     try {
       await video.current!.play();
-      setNotice("");
+      if (req === playRequestId.current && !overlayActiveRef.current && !isOverlayActive) {
+        setNotice("");
+      } else if ((overlayActiveRef.current || isOverlayActive) && video.current) {
+        video.current.pause();
+      }
     } catch {
-      setNotice(
-        "Playback could not start. Try again or reload the local media.",
-      );
+      if (req === playRequestId.current && !overlayActiveRef.current && !isOverlayActive) {
+        setNotice(
+          "Playback could not start. Try again or reload the local media.",
+        );
+      }
     }
   }
   function seek(n: number) {
@@ -116,8 +146,10 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
         if ((e.target as HTMLElement).closest("button,input,select")) return;
         if ([" ", "k", "m", "f", "ArrowLeft", "ArrowRight"].includes(e.key))
           e.preventDefault();
-        if (e.key === " " || e.key === "k")
+        if (e.key === " " || e.key === "k") {
+          if (isOverlayActive || overlayActiveRef.current) return;
           playing ? video.current!.pause() : void play();
+        }
         if (e.key === "m") video.current!.muted = !muted;
         if (e.key === "f") void fullscreen();
         if (e.key === "ArrowLeft") seek(position - 5);
@@ -139,10 +171,28 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
           const save = (
             navigator as Navigator & { connection?: { saveData?: boolean } }
           ).connection?.saveData;
-          if (!matchMedia("(prefers-reduced-motion: reduce)").matches && !save)
-            v.play().catch(() => {});
+          if (
+            !isOverlayActive &&
+            !overlayActiveRef.current &&
+            !matchMedia("(prefers-reduced-motion: reduce)").matches &&
+            !save
+          ) {
+            const req = ++playRequestId.current;
+            v.play()
+              .then(() => {
+                if ((overlayActiveRef.current || isOverlayActive) && video.current) {
+                  video.current.pause();
+                }
+              })
+              .catch(() => {});
+          }
         }}
         onPlay={() => {
+          if (overlayActiveRef.current || isOverlayActive) {
+            video.current?.pause();
+            setPlaying(false);
+            return;
+          }
           setPlaying(true);
           setWaiting(false);
         }}
@@ -160,7 +210,7 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
             setBuffered(v.buffered.end(v.buffered.length - 1));
         }}
         onEnded={() => {
-          if (loop && valid) {
+          if (!overlayActiveRef.current && !isOverlayActive && loop && valid) {
             seek(a!);
             void play();
           } else setPlaying(false);
@@ -183,7 +233,10 @@ export default function VideoPlayer({ edit }: { edit: Edit }) {
         </div>
         <button
           className="primary watch"
-          onClick={() => (playing ? video.current!.pause() : void play())}
+          onClick={() => {
+            if (isOverlayActive || overlayActiveRef.current) return;
+            playing ? video.current!.pause() : void play();
+          }}
         >
           {playing ? <Pause size={17} /> : <Play size={17} />}{" "}
           {playing ? "Pause" : "Watch Now"}
