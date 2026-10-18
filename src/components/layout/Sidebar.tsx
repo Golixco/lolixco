@@ -2,24 +2,22 @@ import {
   Home,
   Clapperboard,
   Compass,
-  Users,
-  Library,
   ChartNoAxesColumn,
   Monitor,
   Settings,
   CircleHelp,
 } from "lucide-react";
+
 const items = [
   ["Home", Home],
   ["Shorts", Clapperboard],
   ["Explore", Compass],
-  ["Following", Users],
-  ["Library", Library],
   ["Creator Studio", ChartNoAxesColumn],
   ["Immersion", Monitor],
   ["Settings", Settings],
   ["Help", CircleHelp],
 ] as const;
+
 export default function Sidebar({
   active,
   onSelect,
@@ -32,10 +30,11 @@ export default function Sidebar({
       {items.map(([name, Icon], i) => (
         <button
           key={name}
+          type="button"
           title={name}
           aria-label={name}
           aria-current={active === name ? "page" : undefined}
-          className={`${active === name ? "selected" : ""} ${i === 4 ? "divider" : ""} ${i === 7 ? "bottom-item" : ""}`}
+          className={`${active === name ? "selected" : ""} ${i === 2 ? "divider" : ""} ${i === 5 ? "bottom-item" : ""}`}
           onClick={() => onSelect(name)}
         >
           <Icon size={22} />
