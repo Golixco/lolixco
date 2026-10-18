@@ -14,7 +14,7 @@
  * - Executable CLI entrypoint with exit codes
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
@@ -26,6 +26,30 @@ try {
   register("./tests/ts-hooks.mjs", new URL("../", import.meta.url));
 } catch {
   // If already registered or unavailable, proceed
+}
+
+/**
+ * Safely writes a file using a sibling temporary file and atomic rename.
+ */
+export function safeAtomicWriteFileSync(filePath, content) {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    writeFileSync(tempPath, content, "utf-8");
+    renameSync(tempPath, filePath);
+  } catch (err) {
+    if (existsSync(tempPath)) {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        // Ignore unlink error
+      }
+    }
+    throw err;
+  }
 }
 
 import { normalizeYouTubeUrl } from "./youtube-normalizer.mjs";
@@ -198,7 +222,12 @@ export async function ingestYouTubeBatch(options = {}) {
       auditData = JSON.parse(readFileSync(auditFilePath, "utf-8"));
       if (!Array.isArray(auditData.items)) auditData.items = [];
     } catch (err) {
-      warnings.push(`Warning: could not parse existing audit file at ${auditFilePath}: ${err.message}. Initializing fresh audit list.`);
+      return {
+        success: false,
+        errors: [`Failed to parse existing audit file at ${auditFilePath}: ${err.message}. Preserving original file without modification.`],
+        warnings,
+        processed: [],
+      };
     }
   }
 
@@ -362,34 +391,78 @@ export async function ingestYouTubeBatch(options = {}) {
             to: "unavailable",
             reason: `privacy_status_${metadata.privacyStatus}`,
           });
-        } else if (
-          existing.metadata &&
-          (existing.metadata.title !== metadata.title ||
-            Math.abs((existing.metadata.durationSec || 0) - (metadata.durationSec || 0)) > 5)
-        ) {
-          finalReviewStatus = "needs_recheck";
-          classification.warnings.push("Material changes detected in video metadata since approval. Transitioned to needs_recheck.");
-          auditHistory.push({
-            date: new Date().toISOString(),
-            event: "status_transition",
-            from: "approved",
-            to: "needs_recheck",
-            reason: "material_metadata_change",
-          });
         } else {
-          // Metadata is valid and unchanged: preserve approved status!
-          finalReviewStatus = "approved";
-          auditHistory.push({
-            date: new Date().toISOString(),
-            event: "reimport_verification",
-            status: "approved",
-            note: "Metadata verified unchanged",
-          });
+          const prevCat = existing.category || existing.ownerCategory || "";
+          const newCat = classification.category || entry.category || "";
+          const prevFandoms = (existing.fandomIds || existing.ownerFandomIds || []).slice().sort().join(",");
+          const newFandoms = (classification.fandomIds || entry.fandomIds || []).slice().sort().join(",");
+          const prevFormat = existing.format || "video";
+          const newFormat = classification.format || "video";
+
+          const isClassificationChanged =
+            (Boolean(prevCat) && Boolean(newCat) && prevCat !== newCat) ||
+            prevFandoms !== newFandoms ||
+            prevFormat !== newFormat;
+
+          if (isClassificationChanged) {
+            finalReviewStatus = "needs_recheck";
+            classification.warnings.push(
+              `Editorial classification changed on re-import (category: '${prevCat}' -> '${newCat}', fandoms: '${prevFandoms}' -> '${newFandoms}', format: '${prevFormat}' -> '${newFormat}'). Transitioned to 'needs_recheck'. Requires explicit owner review.`
+            );
+            auditHistory.push({
+              date: new Date().toISOString(),
+              event: "status_transition",
+              from: "approved",
+              to: "needs_recheck",
+              reason: "editorial_classification_change",
+              previousClassification: {
+                category: prevCat,
+                fandomIds: existing.fandomIds || existing.ownerFandomIds || [],
+                format: prevFormat,
+              },
+              newClassification: {
+                category: newCat,
+                fandomIds: classification.fandomIds || entry.fandomIds || [],
+                format: newFormat,
+              },
+            });
+          } else if (
+            existing.metadata &&
+            (existing.metadata.title !== metadata.title ||
+              Math.abs((existing.metadata.durationSec || 0) - (metadata.durationSec || 0)) > 5)
+          ) {
+            finalReviewStatus = "needs_recheck";
+            classification.warnings.push("Material changes detected in video metadata since approval. Transitioned to needs_recheck.");
+            auditHistory.push({
+              date: new Date().toISOString(),
+              event: "status_transition",
+              from: "approved",
+              to: "needs_recheck",
+              reason: "material_metadata_change",
+            });
+          } else {
+            // Metadata and classifications are valid and unchanged: preserve approved status!
+            finalReviewStatus = "approved";
+            auditHistory.push({
+              date: new Date().toISOString(),
+              event: "reimport_verification",
+              status: "approved",
+              note: "Metadata and classifications verified unchanged",
+            });
+          }
         }
       } else if (existing.contentReviewStatus === "rejected") {
         // Never automatically re-approve a rejected item
         finalReviewStatus = "rejected";
       }
+    }
+
+    let finalAssignedId = existing?.assignedLolixcoId || null;
+    if (existing?.assignedLolixcoId && existing.format && classification.format && existing.format !== classification.format) {
+      finalAssignedId = null;
+      classification.warnings.push(
+        `Format changed from '${existing.format}' to '${classification.format}'. Previously assigned ID ${existing.assignedLolixcoId} requires deliberate migration and review.`
+      );
     }
 
     const auditRecord = {
@@ -413,7 +486,7 @@ export async function ingestYouTubeBatch(options = {}) {
       metadata: metadata || null,
       isMock: metadata?.isMock === true,
       provenance: metadata?.provenance || "unfetched",
-      assignedLolixcoId: existing?.assignedLolixcoId || null,
+      assignedLolixcoId: finalAssignedId,
       auditHistory,
     };
 
@@ -425,13 +498,9 @@ export async function ingestYouTubeBatch(options = {}) {
 
   // 7. Save Audit Trail (unless dryRun)
   if (!dryRun) {
-    const dir = dirname(auditFilePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
     auditData.items = Array.from(existingByVideoId.values());
     auditData.lastUpdated = new Date().toISOString();
-    writeFileSync(auditFilePath, JSON.stringify(auditData, null, 2), "utf-8");
+    safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
   }
 
   return {

@@ -296,6 +296,8 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
       const rawItems = Array.isArray(json.items) ? json.items : [];
       const foundIds = new Set();
       const mappedItems = [];
+      const incompleteIds = [];
+      const itemErrors = [];
 
       for (const item of rawItems) {
         const id = item.id;
@@ -315,7 +317,14 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
 
         // Reject incomplete records without fabricating titles or creator attribution
         if (!rawTitle) {
-          missingIds.push(id);
+          incompleteIds.push(id);
+          itemErrors.push(`Video '${id}': incomplete YouTube API response - missing title in snippet.`);
+          continue;
+        }
+
+        if (!rawChannelTitle) {
+          incompleteIds.push(id);
+          itemErrors.push(`Video '${id}': incomplete YouTube API response - missing channelTitle in snippet.`);
           continue;
         }
 
@@ -337,15 +346,18 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
           regionRestriction: contentDetails.regionRestriction || null,
           isMock: false,
           provenance: "youtube_data_api_v3",
+          fetchStatus: "success",
         });
       }
 
-      const missingIds = batch.filter((id) => !foundIds.has(id));
+      const notFoundIds = batch.filter((id) => !foundIds.has(id));
+      const allMissingIds = [...notFoundIds, ...incompleteIds];
 
       return {
         items: mappedItems,
-        missingIds,
-        errors: [],
+        missingIds: allMissingIds,
+        incompleteIds,
+        errors: itemErrors,
       };
     } catch (err) {
       clearTimeout(timeout);

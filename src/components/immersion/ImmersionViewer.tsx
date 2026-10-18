@@ -48,6 +48,7 @@ export default function ImmersionViewer({
   const [consecutiveSkips, setConsecutiveSkips] = useState<number>(0);
   const [isExhausted, setIsExhausted] = useState<boolean>(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
   const currentEdit = session.currentEdit;
@@ -126,6 +127,7 @@ export default function ImmersionViewer({
   // Navigation: Next
   const handleNext = useCallback(() => {
     setAutoplayBlocked(false);
+    setResumeError(null);
     setConsecutiveSkips(0);
     const { nextEdit, nextState } = advanceImmersionNext(catalog, state);
     if (!nextEdit) {
@@ -139,6 +141,7 @@ export default function ImmersionViewer({
   // Navigation: Previous
   const handlePrevious = useCallback(() => {
     setAutoplayBlocked(false);
+    setResumeError(null);
     const { prevEdit, nextState } = advanceImmersionPrevious(state);
     if (prevEdit) {
       setSession({ currentEdit: prevEdit, state: nextState });
@@ -164,6 +167,7 @@ export default function ImmersionViewer({
       playbackCoordinator.notifyPlaying("immersion-player");
       setIsPlaying(true);
       setAutoplayBlocked(false);
+      setResumeError(null);
       if (nativeVideoRef.current) nativeVideoRef.current.play().catch(() => {});
       if (ytPlayerRef.current) {
         try {
@@ -174,6 +178,30 @@ export default function ImmersionViewer({
       }
     }
   }, [isPlaying]);
+
+  // Dedicated Resume Playback action for explicit user interaction after autoplay blockage (FIX G)
+  const handleResumePlayback = useCallback(() => {
+    setResumeError(null);
+    playbackCoordinator.notifyPlaying("immersion-player");
+    setIsPlaying(true);
+    setAutoplayBlocked(false);
+
+    if (currentEdit && isYouTubeEmbed(currentEdit)) {
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.playVideo();
+        } catch {
+          setAutoplayBlocked(true);
+          setResumeError("Playback could not be resumed. Tap or click directly on the video player.");
+        }
+      }
+    } else if (nativeVideoRef.current) {
+      nativeVideoRef.current.play().catch(() => {
+        setAutoplayBlocked(true);
+        setResumeError("Playback could not be resumed. Please interact with the page to allow audio/video.");
+      });
+    }
+  }, [currentEdit]);
 
   // Handle Playback Error with bounded skip retry
   const handlePlaybackError = useCallback(() => {
@@ -385,10 +413,15 @@ export default function ImmersionViewer({
                 <button
                   type="button"
                   className="immersion-prompt-btn"
-                  onClick={handleTogglePlay}
+                  onClick={handleResumePlayback}
                 >
-                  Click to Resume Playback
+                  Continue Playback
                 </button>
+                {resumeError && (
+                  <p style={{ color: "#f87171", fontSize: "0.85rem", marginTop: 8 }}>
+                    {resumeError}
+                  </p>
+                )}
               </div>
             )}
           </div>

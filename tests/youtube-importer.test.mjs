@@ -262,8 +262,12 @@ test("YOUTUBE COMPILER: strictly preserves 17 baseline demo edits and strips pri
           format: "video",
           contentReviewStatus: "approved",
           assignedLolixcoId: 100,
+          provenance: "youtube_data_api_v3",
+          metadataFetchStatus: "fetched",
           lastMetadataVerification: new Date().toISOString(),
           metadata: {
+            canonicalVideoId: "approved123",
+            provenance: "youtube_data_api_v3",
             title: "Approved Valorant Edit",
             description: "Public description",
             channelTitle: "Pro Gamer",

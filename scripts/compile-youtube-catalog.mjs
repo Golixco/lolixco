@@ -34,6 +34,7 @@ try {
 
 import { allocateStableId, CANONICAL_CATEGORIES } from "./youtube-editorial.mjs";
 import { loadEnvConfig } from "./youtube-api.mjs";
+import { safeAtomicWriteFileSync } from "./youtube-importer.mjs";
 export const CANONICAL_AUDIT_PATH = resolve(projectRoot, "content/audit/youtube-intake-audit.json");
 export const CANONICAL_OUTPUT_PATH = resolve(projectRoot, "src/data/edits.ts");
 
@@ -200,7 +201,6 @@ const baseDemoEdits: Edit[] = titles.map((title, id) => ({
   source: assetUrl(mediaAssets.video, import.meta.env?.BASE_URL ?? "/"),
   duration: "0:12",
   trending: id > 10,
-  sourceType: "local_demo",
 }));
 
 `;
@@ -256,11 +256,30 @@ export async function compileYouTubeCatalog(options = {}) {
     dryRun = true,
     allowDraft = false,
     baseCatalog = null,
-    forceSynthetic = false,
+    maxMetadataAgeDays = 30,
+    maxMetadataAgeMs = null,
+    now = null,
   } = options;
 
   const errors = [];
   const warnings = [];
+
+  const isTargetingProduction = outputPath.includes("src/data/edits.ts");
+
+  // FIX A: Separate preview-only behavior from publication
+  // Production writes must require explicit approved or published status
+  if (!dryRun && allowDraft) {
+    return {
+      success: false,
+      errors: [
+        "Compilation aborted: 'allowDraft' is strictly forbidden during catalog writes. Production writes require explicit 'approved' or 'published' status."
+      ],
+      warnings: [],
+      compiledCount: 0,
+      compiledEdits: baseCatalog || [],
+      dryRun,
+    };
+  }
 
   // 1. Load base catalog
   let currentBaseCatalog = baseCatalog;
@@ -286,10 +305,11 @@ export async function compileYouTubeCatalog(options = {}) {
   } catch (err) {
     return {
       success: false,
-      errors: [`Failed to parse audit file at ${auditFilePath}: ${err.message}`],
+      errors: [`Failed to parse audit file at ${auditFilePath}: ${err.message}. Preserving original file without modification.`],
       warnings: [],
       compiledCount: 0,
       compiledEdits: currentBaseCatalog,
+      dryRun,
     };
   }
 
@@ -303,13 +323,12 @@ export async function compileYouTubeCatalog(options = {}) {
     const status = item.contentReviewStatus;
     if (status === "approved" || status === "published") {
       approvedItems.push(item);
-    } else if (allowDraft && (status === "metadata_collected" || status === "embed_eligible")) {
+    } else if (dryRun && allowDraft && (status === "metadata_collected" || status === "embed_eligible")) {
       approvedItems.push(item);
     }
   }
 
   // 3. Fail-Closed Item Validation before compilation (FIX B, FIX D, FIX E)
-  const isTargetingProduction = outputPath.includes("src/data/edits.ts");
   const newEdits = [];
   const allocatedItems = [];
   const seenLolixcoIds = new Set(currentBaseCatalog.slice(0, 17).map((e) => e.id));
@@ -330,10 +349,45 @@ export async function compileYouTubeCatalog(options = {}) {
     }
     seenYouTubeVideoIds.add(videoId);
 
-    // C. Synthetic mock rejection (FIX B)
-    const isMock = item.isMock === true || item.metadata?.isMock === true || item.provenance === "synthetic_mock";
-    if (isMock && isTargetingProduction && !forceSynthetic) {
-      errors.push(`Item '${videoId}': synthetic mock metadata is prohibited from production catalog publication. Real YouTube API metadata is required.`);
+    // Approval status validation (FIX A)
+    if (item.contentReviewStatus !== "approved" && item.contentReviewStatus !== "published") {
+      if (!dryRun || (isTargetingProduction && !allowDraft)) {
+        errors.push(
+          `Item '${videoId}': unapproved review status '${item.contentReviewStatus}'. Production publication strictly requires 'approved' or 'published' review status.`
+        );
+      }
+    }
+
+    // C. Synthetic mock & positive API provenance validation (FIX B)
+    const isMock =
+      item.isMock === true ||
+      item.metadata?.isMock === true ||
+      item.provenance === "synthetic_mock";
+
+    if (isTargetingProduction || !dryRun) {
+      if (isMock) {
+        errors.push(
+          `Item '${videoId}': synthetic mock metadata is prohibited from production catalog publication. Real YouTube API metadata is required.`
+        );
+      }
+
+      if (item.provenance !== "youtube_data_api_v3" || item.metadata?.provenance !== "youtube_data_api_v3") {
+        errors.push(
+          `Item '${videoId}': missing or unverified API provenance ('${item.provenance}'). Positive evidence of genuine YouTube Data API v3 retrieval is required for production publication.`
+        );
+      }
+
+      if (item.metadataFetchStatus === "failed" || !item.metadata) {
+        errors.push(
+          `Item '${videoId}': unfetched or failed metadata record cannot be published to production.`
+        );
+      }
+
+      if (!item.metadata || item.canonicalVideoId !== item.metadata.canonicalVideoId) {
+        errors.push(
+          `Item '${videoId}': canonical YouTube ID mismatch between audit record ('${item.canonicalVideoId}') and metadata payload ('${item.metadata?.canonicalVideoId}').`
+        );
+      }
     }
 
     // D. Public availability and embedding eligibility check (FIX E)
@@ -366,9 +420,29 @@ export async function compileYouTubeCatalog(options = {}) {
       errors.push(`Item '${videoId}': invalid or missing duration metadata.`);
     }
 
-    // F. Freshness verification
-    if (!item.lastMetadataVerification || isNaN(Date.parse(item.lastMetadataVerification))) {
+    // F. Freshness verification (FIX D)
+    const verificationTimestamp = item.lastMetadataVerification;
+    if (!verificationTimestamp || isNaN(Date.parse(verificationTimestamp))) {
       errors.push(`Item '${videoId}': missing or invalid lastMetadataVerification timestamp.`);
+    } else {
+      const verifiedTime = new Date(verificationTimestamp).getTime();
+      const currentTime = now ? new Date(now).getTime() : Date.now();
+      const effectiveMaxAgeMs = typeof maxMetadataAgeMs === "number"
+        ? maxMetadataAgeMs
+        : (maxMetadataAgeDays || 30) * 24 * 60 * 60 * 1000;
+
+      // Reject future-dated timestamps (tolerance: 5 minutes)
+      if (verifiedTime > currentTime + (5 * 60 * 1000)) {
+        errors.push(
+          `Item '${videoId}': future-dated verification timestamp '${verificationTimestamp}' is invalid.`
+        );
+      } else if (currentTime - verifiedTime > effectiveMaxAgeMs) {
+        const ageDays = ((currentTime - verifiedTime) / (24 * 60 * 60 * 1000)).toFixed(1);
+        const maxDays = (effectiveMaxAgeMs / (24 * 60 * 60 * 1000)).toFixed(0);
+        errors.push(
+          `Item '${videoId}': metadata verification is stale (${ageDays} days old, max allowed is ${maxDays} days). Fresh YouTube API verification is required before publication.`
+        );
+      }
     }
 
     // G. Explicit confirmed format
@@ -437,16 +511,16 @@ export async function compileYouTubeCatalog(options = {}) {
 
   const finalEdits = [...currentBaseCatalog.slice(0, 17), ...newEdits];
 
-  // 4. Write to output if not dryRun
+  // 4. Write to output if not dryRun (FIX F: atomic writes)
   let writtenTo = null;
   if (!dryRun) {
     const code = generateYouTubeEditsTs(finalEdits);
-    writeFileSync(outputPath, code, "utf-8");
+    safeAtomicWriteFileSync(outputPath, code);
     writtenTo = outputPath;
 
     // Persist newly assigned IDs back to audit file if updated
     auditData.items = items;
-    writeFileSync(auditFilePath, JSON.stringify(auditData, null, 2), "utf-8");
+    safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
   }
 
   return {
@@ -510,6 +584,12 @@ Options:
     } else if (arg === "--allow-draft") {
       options.allowDraft = true;
     }
+  }
+
+  // FIX A: Disallow combining --publish with --allow-draft
+  if (options.publish && options.allowDraft) {
+    console.error("\n❌ Compilation aborted: Combining --publish with --allow-draft is prohibited. Production writes strictly require explicit 'approved' or 'published' review status.");
+    return 1;
   }
 
   if (options.review) {
