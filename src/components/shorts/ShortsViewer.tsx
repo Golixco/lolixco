@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import type { Edit } from "../../data/edits";
 import { getFandomById } from "../../data/fandoms";
+import { YouTubePlayer } from "../video/YouTubePlayer";
 
 export interface ShortsViewerProps {
   shorts: Edit[];
@@ -385,39 +386,59 @@ export function ShortsViewer({
 
         {/* Vertical Viewport Frame */}
         <div className="shorts-viewer-frame" onClick={togglePlay}>
-          {/* Always keep video element mounted in DOM to guarantee ref and retry reliability */}
-          <video
-            ref={videoRef}
-            src={currentShort.source}
-            poster={currentShort.poster}
-            className="shorts-video-element"
-            style={{ display: hasError ? "none" : "block" }}
-            loop
-            playsInline
-            muted={isMuted}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-            onWaiting={() => setIsWaiting(true)}
-            onPlaying={() => {
-              setIsWaiting(false);
-              setIsPlaying(true);
-            }}
-            onTimeUpdate={() => {
-              if (videoRef.current) {
-                setCurrentTime(videoRef.current.currentTime);
-              }
-            }}
-            onLoadedMetadata={() => {
-              if (videoRef.current) {
-                setDuration(videoRef.current.duration);
-              }
-            }}
-            onError={() => {
-              setHasError(true);
-              setIsPlaying(false);
-              setIsWaiting(false);
-            }}
-          />
+          {currentShort.sourceType === "youtube_embed" && currentShort.youtubeVideoId ? (
+            <YouTubePlayer
+              videoId={currentShort.youtubeVideoId}
+              title={currentShort.title}
+              poster={currentShort.poster}
+              aspectRatio="9:16"
+              autoPlay={true}
+              muted={isMuted}
+              controls={true}
+              onEnded={handleNext}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onError={() => {
+                setHasError(true);
+                setIsPlaying(false);
+                setIsWaiting(false);
+              }}
+            />
+          ) : (
+            /* Always keep video element mounted in DOM to guarantee ref and retry reliability for native video */
+            <video
+              ref={videoRef}
+              src={currentShort.source}
+              poster={currentShort.poster}
+              className="shorts-video-element"
+              style={{ display: hasError ? "none" : "block" }}
+              loop
+              playsInline
+              muted={isMuted}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onWaiting={() => setIsWaiting(true)}
+              onPlaying={() => {
+                setIsWaiting(false);
+                setIsPlaying(true);
+              }}
+              onTimeUpdate={() => {
+                if (videoRef.current) {
+                  setCurrentTime(videoRef.current.currentTime);
+                }
+              }}
+              onLoadedMetadata={() => {
+                if (videoRef.current) {
+                  setDuration(videoRef.current.duration);
+                }
+              }}
+              onError={() => {
+                setHasError(true);
+                setIsPlaying(false);
+                setIsWaiting(false);
+              }}
+            />
+          )}
 
           {hasError && (
             <div className="shorts-error-state" role="alert">

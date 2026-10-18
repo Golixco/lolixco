@@ -24,6 +24,8 @@ import {
 } from "./data/feedComposition";
 import { ShortsShelf } from "./components/shorts/ShortsShelf";
 import { ShortsViewer } from "./components/shorts/ShortsViewer";
+import ImmersionViewer from "./components/immersion/ImmersionViewer";
+import { selectEditOfTheMoment } from "./utils/editOfTheMoment";
 import { useDiscoveryFeed } from "./hooks/useDiscoveryFeed";
 import { useRecommendations } from "./hooks/useRecommendations";
 import { Clapperboard } from "lucide-react";
@@ -194,11 +196,34 @@ export default function App({
     [initialEdits]
   );
 
-  // Guarantee that Shorts-only catalogs never place a Short into the landscape player
-  const initialLandscapeVideo = useMemo(
-    () => initialEdits.find((e) => isVideo(e)) || null,
+  const [shuffleOffset, setShuffleOffset] = useState(0);
+
+  const hasCuratedYouTubeContent = useMemo(
+    () =>
+      initialEdits.some(
+        (e) => isVideo(e) && e.sourceType === "youtube_embed"
+      ),
     [initialEdits]
   );
+
+  // Guarantee that Shorts-only catalogs never place a Short into the landscape player.
+  // Until genuine YouTube content is approved, preserves the existing demo featured experience (Edit 0: "Into the Light").
+  // When genuine YouTube edits are approved, uses the deterministic Edit of the Moment daily selection.
+  const initialLandscapeVideo = useMemo(() => {
+    if (hasCuratedYouTubeContent) {
+      return (
+        selectEditOfTheMoment(initialEdits, new Date(), shuffleOffset) ||
+        initialEdits.find((e) => isVideo(e)) ||
+        null
+      );
+    }
+    const demoVideos = initialEdits.filter(isVideo);
+    if (demoVideos.length === 0) return null;
+    if (shuffleOffset > 0) {
+      return demoVideos[shuffleOffset % demoVideos.length];
+    }
+    return demoVideos[0];
+  }, [hasCuratedYouTubeContent, initialEdits, shuffleOffset]);
 
   // Initialize navigation state from URL query parameters
   const initialParams = parseUrlParams(initialEdits);
@@ -218,6 +243,7 @@ export default function App({
     return null;
   });
   const [modal, setModal] = useState("");
+  const [immersionOpen, setImmersionOpen] = useState(false);
 
   // Active viewer session identifier and monotonic session counter.
   // Restore existing application-owned viewer session on refresh if URL has a valid Short
@@ -507,6 +533,17 @@ export default function App({
     });
   }
 
+  const handleShuffleFeatured = useCallback(() => {
+    setShuffleOffset((prev) => {
+      const nextOffset = prev + 1;
+      const nextFeatured = selectEditOfTheMoment(initialEdits, new Date(), nextOffset);
+      if (nextFeatured) {
+        setSelected(nextFeatured);
+      }
+      return nextOffset;
+    });
+  }, [initialEdits]);
+
   function navigate(name: string) {
     setDrawer(false);
     if (name === "Home") {
@@ -545,6 +582,8 @@ export default function App({
         viewerSessionIdRef.current = null;
         syncUrl("All", "", "", "Shorts", null, true, null);
       }
+    } else if (name === "Immersion") {
+      setImmersionOpen(true);
     } else {
       setModal(name);
     }
@@ -737,7 +776,8 @@ export default function App({
                 <VideoPlayer
                   key={selected.id}
                   edit={selected}
-                  isOverlayActive={!!activeShort}
+                  isOverlayActive={!!activeShort || immersionOpen}
+                  onShuffle={handleShuffleFeatured}
                 />
                 <section className="up-next">
                   <h2>Up Next</h2>
@@ -767,7 +807,7 @@ export default function App({
                       onTagClick={handleTagClick}
                     />
                     {idx === 0 && (
-                      <ImmersionBanner onOpen={() => setModal("Immersion")} />
+                      <ImmersionBanner onOpen={() => setImmersionOpen(true)} />
                     )}
                   </div>
                 );
@@ -905,6 +945,18 @@ export default function App({
           onShortChange={handleShortChange}
           onClose={handleCloseShort}
           onTagClick={handleShortsViewerTagClick}
+        />
+      )}
+      {immersionOpen && (
+        <ImmersionViewer
+          catalog={initialEdits}
+          initialContext={{
+            category: category !== "All" ? category : undefined,
+            fandomId: fandom || undefined,
+            currentEditId: selected?.id,
+          }}
+          onClose={() => setImmersionOpen(false)}
+          onTagClick={handleTagClick}
         />
       )}
     </div>

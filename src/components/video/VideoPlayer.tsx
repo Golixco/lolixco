@@ -9,9 +9,11 @@ import {
   Settings2,
   PictureInPicture2,
   Award,
+  Shuffle,
 } from "lucide-react";
 import type { Edit } from "../../data/edits";
 import { validLoop, loopSeek } from "../../data/logic.js";
+import { YouTubePlayer } from "./YouTubePlayer";
 const time = (n: number) =>
   `${Math.floor(n / 60)}:${Math.floor(n % 60)
     .toString()
@@ -19,9 +21,11 @@ const time = (n: number) =>
 export default function VideoPlayer({
   edit,
   isOverlayActive,
+  onShuffle,
 }: {
   edit: Edit;
   isOverlayActive?: boolean;
+  onShuffle?: () => void;
 }) {
   const video = useRef<HTMLVideoElement>(null),
     container = useRef<HTMLDivElement>(null);
@@ -136,6 +140,47 @@ export default function VideoPlayer({
       setNotice("Fullscreen is unavailable in this browser.");
     }
   }
+  if (edit.sourceType === "youtube_embed" && edit.youtubeVideoId) {
+    return (
+      <div
+        ref={container}
+        className="player youtube-featured"
+        tabIndex={0}
+        aria-label={`${edit.title} video player`}
+      >
+        <YouTubePlayer
+          videoId={edit.youtubeVideoId}
+          title={edit.title}
+          poster={edit.poster}
+          aspectRatio="16:9"
+          autoPlay={!isOverlayActive}
+          controls={true}
+        />
+        <div className="player-shade" style={{ pointerEvents: "none" }} />
+        <div className="hero-info" style={{ pointerEvents: "none" }}>
+          <span className="eyebrow">
+            <Award size={15} /> EDIT OF THE MOMENT
+            {onShuffle && (
+              <button
+                type="button"
+                className="shuffle-moment-btn"
+                onClick={onShuffle}
+                title="Shuffle Edit of the Moment"
+                aria-label="Shuffle Edit of the Moment"
+              >
+                <Shuffle size={13} /> Shuffle
+              </button>
+            )}
+          </span>
+          <h1>{edit.title}</h1>
+          <div className="hero-meta">
+            <span>{edit.category} · Curated edit</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={container}
@@ -226,6 +271,17 @@ export default function VideoPlayer({
       <div className="hero-info">
         <span className="eyebrow">
           <Award size={15} /> EDIT OF THE MOMENT
+          {onShuffle && (
+            <button
+              type="button"
+              className="shuffle-moment-btn"
+              onClick={onShuffle}
+              title="Shuffle Edit of the Moment"
+              aria-label="Shuffle Edit of the Moment"
+            >
+              <Shuffle size={13} /> Shuffle
+            </button>
+          )}
         </span>
         <h1>{edit.title}</h1>
         <div className="hero-meta">

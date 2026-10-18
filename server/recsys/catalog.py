@@ -130,6 +130,10 @@ class Catalog:
         "source",
         "duration",
         "trending",
+        "format",
+        "fandomIds",
+        "sourceType",
+        "youtubeVideoId",
     }
     REQUIRED_FIELDS = {
         "id",
@@ -232,6 +236,37 @@ class Catalog:
                     f"Record at index {idx}: 'trending' must be boolean, got {type(raw_trending).__name__}: {raw_trending!r}"
                 )
 
+            raw_format = raw.get("format", "video")
+            if type(raw_format) is not str or raw_format not in ("video", "short"):
+                raise ValueError(
+                    f"Record at index {idx}: 'format' must be 'video' or 'short', got {raw_format!r}"
+                )
+
+            raw_fandom_ids = raw.get("fandomIds", ())
+            if not isinstance(raw_fandom_ids, (list, tuple)) or isinstance(raw_fandom_ids, (str, bytes)):
+                raise TypeError(
+                    f"Record at index {idx}: 'fandomIds' must be a sequence of strings, got {type(raw_fandom_ids).__name__}: {raw_fandom_ids!r}"
+                )
+            cleaned_fandom_ids = []
+            for f_idx, f_id in enumerate(raw_fandom_ids):
+                if type(f_id) is not str or not f_id.strip():
+                    raise TypeError(
+                        f"Record at index {idx}, fandomId {f_idx}: must be non-empty string, got {type(f_id).__name__}: {f_id!r}"
+                    )
+                cleaned_fandom_ids.append(f_id.strip())
+
+            raw_source_type = raw.get("sourceType", "local_demo")
+            if type(raw_source_type) is not str or raw_source_type not in ("local_demo", "youtube_embed", "licensed_local_media"):
+                raise ValueError(
+                    f"Record at index {idx}: 'sourceType' must be 'local_demo', 'youtube_embed', or 'licensed_local_media', got {raw_source_type!r}"
+                )
+
+            raw_youtube_id = raw.get("youtubeVideoId", "")
+            if type(raw_youtube_id) is not str:
+                raise TypeError(
+                    f"Record at index {idx}: 'youtubeVideoId' must be string, got {type(raw_youtube_id).__name__}"
+                )
+
             item = EditItem(
                 id=raw_id,
                 title=raw_title.strip(),
@@ -245,6 +280,10 @@ class Catalog:
                 duration_ms=dur_ms,
                 duration_sec=dur_sec,
                 trending=raw_trending,
+                format=raw_format,
+                fandom_ids=tuple(cleaned_fandom_ids),
+                source_type=raw_source_type,
+                youtube_video_id=raw_youtube_id,
             )
             items.append(item)
 

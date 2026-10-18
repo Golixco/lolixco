@@ -64,6 +64,10 @@ class EditItem:
     duration_ms: int  # e.g. 12000
     duration_sec: float  # e.g. 12.0
     trending: bool = False
+    format: str = "video"
+    fandom_ids: tuple[str, ...] = ()
+    source_type: str = "local_demo"
+    youtube_video_id: str = ""
 
     def __post_init__(self) -> None:
         # Strict integer check: Python booleans are subclasses of int, so reject bool explicitly
@@ -107,6 +111,22 @@ class EditItem:
         if type(self.trending) is not bool:
             raise TypeError(f"trending must be boolean, got {type(self.trending).__name__}: {self.trending!r}")
 
+        if type(self.format) is not str or self.format not in ("video", "short"):
+            raise ValueError(f"format must be 'video' or 'short', got {self.format!r}")
+
+        if not isinstance(self.fandom_ids, (tuple, list)) or isinstance(self.fandom_ids, (str, bytes)):
+            raise TypeError(f"fandom_ids must be sequence of strings, got {type(self.fandom_ids).__name__}: {self.fandom_ids!r}")
+
+        for fid in self.fandom_ids:
+            if type(fid) is not str or not fid.strip():
+                raise TypeError(f"Each fandom_id must be non-empty string, got {fid!r}")
+
+        if type(self.source_type) is not str or self.source_type not in ("local_demo", "youtube_embed", "licensed_local_media"):
+            raise ValueError(f"source_type must be 'local_demo', 'youtube_embed', or 'licensed_local_media', got {self.source_type!r}")
+
+        if type(self.youtube_video_id) is not str:
+            raise TypeError(f"youtube_video_id must be string, got {type(self.youtube_video_id).__name__}")
+
 
 @dataclass(frozen=True)
 class WatchHistoryEntry:
@@ -135,6 +155,7 @@ CANONICAL_CATEGORIES: tuple[str, ...] = (
     "Movies",
     "Series",
     "Phonk",
+    "Multifandom",
 )
 
 

@@ -1835,3 +1835,238 @@ dialog .fine-print {
   }
 }
 
+/* ==========================================================================
+   Immersion Mode Fullscreen Viewer
+   ========================================================================== */
+.immersion-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow: hidden;
+  font-family: var(--font-sans, "Inter", sans-serif);
+}
+
+.immersion-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, transparent 100%);
+  z-index: 25;
+}
+
+.immersion-meta-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 75%;
+}
+
+.immersion-badge {
+  font-family: var(--font-display, "Rajdhani", sans-serif);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--yellow, #fff000);
+  background: rgba(255, 240, 0, 0.12);
+  border: 1px solid rgba(255, 240, 0, 0.35);
+  padding: 3px 10px;
+  border-radius: 4px;
+}
+
+.immersion-title-group {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.immersion-title {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.immersion-channel {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.immersion-stage-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.12);
+  padding: 3px 9px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+.immersion-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.immersion-main-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 0 16px;
+  box-sizing: border-box;
+}
+
+.immersion-video-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8);
+}
+
+.immersion-video-wrapper.landscape {
+  aspect-ratio: 16 / 9;
+  width: min(94vw, calc((100vh - 160px) * 16 / 9));
+  height: min(calc(94vw * 9 / 16), calc(100vh - 160px));
+}
+
+.immersion-video-wrapper.portrait {
+  aspect-ratio: 9 / 16;
+  height: min(calc(100vh - 160px), 880px);
+  width: min(calc(min(calc(100vh - 160px), 880px) * 9 / 16), 94vw);
+}
+
+.immersion-bottombar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.85) 0%, transparent 100%);
+  z-index: 25;
+}
+
+.immersion-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.immersion-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 50%;
+  width: 44px;
+  height: 44px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+
+.immersion-btn:hover:not(:disabled) {
+  background: rgba(255, 240, 0, 0.2);
+  border-color: var(--yellow, #fff000);
+  color: var(--yellow, #fff000);
+  transform: scale(1.06);
+}
+
+.immersion-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.immersion-tag-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  max-width: 40%;
+}
+
+.immersion-tag {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.immersion-tag:hover {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.immersion-prompt-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+  z-index: 30;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+}
+
+.immersion-prompt-btn {
+  background: var(--yellow, #fff000);
+  color: #000;
+  border: none;
+  border-radius: 24px;
+  padding: 10px 24px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  transition: transform 0.2s ease;
+}
+
+.immersion-prompt-btn:hover {
+  transform: scale(1.05);
+}
+
+.shuffle-moment-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  pointer-events: auto;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.shuffle-moment-btn:hover {
+  background: rgba(255, 240, 0, 0.2);
+  border-color: var(--yellow, #fff000);
+  color: var(--yellow, #fff000);
+}
+

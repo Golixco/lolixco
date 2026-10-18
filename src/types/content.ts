@@ -10,6 +10,17 @@
 export type ContentFormat = "video" | "short";
 
 /**
+ * Distinguishes the underlying playback mechanism:
+ * - local_demo: Sample geometric motion study served locally (baseline demos 0-16)
+ * - youtube_embed: Curated external YouTube edit played via official IFrame API
+ * - licensed_local_media: Future creator-hosted direct video files
+ */
+export type VideoSourceType =
+  | "local_demo"
+  | "youtube_embed"
+  | "licensed_local_media";
+
+/**
  * Production primary categories for the curated Lolixco catalog.
  */
 export type CanonicalCategory =
@@ -52,6 +63,11 @@ export interface PublicMediaMetadata {
   poster: string;
   source: string;
   duration: string;
+  sourceType?: VideoSourceType;
+  youtubeVideoId?: string;
+  channelTitle?: string;
+  channelId?: string;
+  sourceUrl?: string;
 }
 
 /**
