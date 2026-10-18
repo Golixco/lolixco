@@ -1021,29 +1021,62 @@ test("Mounted Interaction: Search typing updates query without browser history p
   // Find search input
   let searchInput = null;
   function findInput(n) {
-    if (n.tagName === "INPUT") searchInput = n;
+    if (n.tagName === "INPUT" && n.getAttribute("aria-label") === "Search") searchInput = n;
     if (n.childNodes) for (const c of n.childNodes) findInput(c);
   }
   findInput(container);
   assert.ok(searchInput, "Search input must be present in Header");
 
+  // Find React props key
+  const propsKey = Object.keys(searchInput).find((k) => k.startsWith("__reactProps$"));
+  assert.ok(propsKey, "React internal props must be accessible on search input");
+
   // Simulate multiple keystrokes in search input
   const keystrokes = ["v", "va", "val", "valo"];
   for (const val of keystrokes) {
     await act(async () => {
-      searchInput.dispatchEvent({
-        type: "change",
-        target: { value: val },
-        bubbles: true,
-      });
+      if (searchInput[propsKey]?.onChange) {
+        searchInput[propsKey].onChange({ target: { value: val } });
+      } else {
+        searchInput.dispatchEvent({
+          type: "change",
+          target: { value: val },
+          bubbles: true,
+        });
+      }
     });
   }
 
-  // Push count must NOT increase per keystroke (replaceState is used)
+  // 1. Confirm typing actually updates the search input's controlled value
+  assert.equal(
+    searchInput[propsKey]?.value,
+    "valo",
+    "Typing in search input must update the input's controlled value"
+  );
+
+  // 2. Confirm the URL query updates with replaceState (?q=valo)
+  assert.equal(
+    historyState.search,
+    "?q=valo",
+    "URL query parameter must update to reflect current search text"
+  );
+
+  // 3. Confirm displayed search results update
+  assert.equal(
+    findHeading1(container),
+    "Search results for “valo”",
+    "Search results heading must update to reflect active query"
+  );
+
+  // 4. Confirm keystrokes do NOT create additional history entries (replaceState used)
   assert.equal(
     historyState.pushCount,
     pushCountBefore,
     "Keystrokes in search bar must NOT push history entries (avoid history pollution)"
+  );
+  assert.ok(
+    historyState.replaceCount >= keystrokes.length,
+    "Each search keystroke must update history via replaceState"
   );
 
   await cleanup();

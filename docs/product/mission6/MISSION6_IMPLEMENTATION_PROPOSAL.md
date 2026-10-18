@@ -104,7 +104,7 @@ export interface EditorialMetadata {
 - **Multi-Fandom Support:** Uses `fandomIds: string[]` (array of stable slug identifiers), never a single brittle display string.
 - **Stable Slugs:** Separates stable canonical slugs (e.g. `jujutsu-kaisen`, `valorant`) from human-readable labels (`Jujutsu Kaisen`, `Valorant`) and hashtags (`#jjk`, `#valorant`).
 - **Separation of Concerns:** Public metadata presented to visitors contains zero creator names or private rankings. Internal recommendation engine fields remain preserved in Python types and catalog snapshot.
-- **Cinematic Preservation:** The 17 demo items keep their canonical category `"Cinematic"`. Cinematic is **NOT** aliased to `Movies` or `Multifandom`. It remains discoverable under `"Cinematic"` and `"All"`.
+- **Cinematic Preservation:** The demo items assigned to category `"Cinematic"` (IDs 0, 6, and 12 out of the 17 items distributed across Cinematic, Gaming, Anime, Movies, Series, and Phonk) keep their category verbatim. Cinematic is **NOT** aliased to `Movies` or `Multifandom`. It remains discoverable under `"Cinematic"` and `"All"`.
 
 ---
 

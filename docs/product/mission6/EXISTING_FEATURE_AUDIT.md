@@ -42,7 +42,7 @@
 - **Primary Taxonomy:** `All`, `Anime`, `Movies`, `Series`, `Multifandom`, `Gaming`, `Phonk`, `Cinematic`.
 - **Semantics:**
   1. `All` is an open browsing mode encompassing all catalog items.
-  2. `Cinematic` is preserved as a legacy demo category for the initial 17 motion studies. It is **NOT** aliased to `Movies` or `Multifandom`.
+  2. `Cinematic` is preserved as a legacy demo category for IDs 0, 6, and 12 in the 17-item demo catalog (which distributes items across Cinematic, Gaming, Anime, Movies, Series, and Phonk). It is **NOT** aliased to `Movies` or `Multifandom`.
   3. `Multifandom` is recognized in the frontend taxonomy for upcoming crossover edits; it is not sent to the current recsys backend which rejects unknown categories.
   4. Fandom sub-chips appear only when the selected category has registered fandoms (e.g. `Gaming -> Valorant, Doom`; `Anime -> Jujutsu Kaisen, Demon Slayer`; `Movies -> Spider-Man`).
   5. Selecting an incompatible category clears active fandom selection automatically.
@@ -79,5 +79,5 @@
 ## 3. Backward Compatibility & Catalog Drift Constraints
 
 - The current repository enforces zero drift between `server/recsys/catalog_snapshot.json` and `src/data/edits.ts` via `python3 -m server.recsys.export_catalog --check`.
-- The 17 demo edits use category `"Cinematic"`.
-- **Constraint:** `"Cinematic"` is preserved verbatim in `src/data/edits.ts` and `catalog_snapshot.json` to maintain 100% backward compatibility with Missions 1–5 without drift.
+- The 17 demo edits distribute across six canonical and legacy categories (Cinematic: IDs 0, 6, 12; Gaming: IDs 1, 7, 13; Anime: IDs 2, 8, 14; Movies: IDs 3, 9, 15; Series: IDs 4, 10, 16; Phonk: IDs 5, 11).
+- **Constraint:** Category assignments (including `"Cinematic"` for IDs 0, 6, and 12) are preserved verbatim in `src/data/edits.ts` and `catalog_snapshot.json` to maintain 100% backward compatibility with Missions 1–5 without drift.
