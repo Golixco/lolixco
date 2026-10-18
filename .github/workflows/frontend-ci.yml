@@ -41,7 +41,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python API dependencies
-        run: pip install -r server/recsys/requirements.txt jsonschema
+        run: pip install -r server/recsys/requirements.txt "jsonschema[format-nongpl]"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

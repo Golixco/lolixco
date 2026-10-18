@@ -26,6 +26,12 @@ import { FANDOM_REGISTRY } from "../src/data/fandoms.ts";
 import { edits } from "../src/data/edits.ts";
 
 const hasPythonJsonschema = spawnSync("python3", ["-c", "import jsonschema"]).status === 0;
+const hasPythonDateTimeChecker =
+  hasPythonJsonschema &&
+  spawnSync("python3", [
+    "-c",
+    "import jsonschema; assert 'date-time' in jsonschema.FormatChecker().checkers",
+  ]).status === 0;
 
 const MOCK_VALID_VIDEO = {
   id: 101,
@@ -871,6 +877,10 @@ test("FIX B: Comprehensive regression test comparing representative invalid docu
 
     // 2. Python jsonschema outcome (when jsonschema package is available)
     if (hasPythonJsonschema) {
+      if (doc.name === "invalid-generatedAt" && !hasPythonDateTimeChecker) {
+        // Skip Python date-time format check if rfc3339-validator / format-nongpl is not installed
+        continue;
+      }
       const pythonCheck = spawnSync(
         "python3",
         [
@@ -1557,8 +1567,8 @@ test("V4 ISSUE C: validateContentManifest() entry point enforces JSON Schema: re
     assert.equal(res.valid, false, `Date ${badDate} should fail validation`);
     assert.match(res.errors.join("; "), /must be a valid RFC 3339 \/ ISO 8601 date-time string/);
 
-    // Confirm Python jsonschema agreement (when jsonschema package is available)
-    if (hasPythonJsonschema) {
+    // Confirm Python jsonschema agreement (when jsonschema date-time format checker is available)
+    if (hasPythonDateTimeChecker) {
       const pythonCheck = spawnSync(
         "python3",
         [
