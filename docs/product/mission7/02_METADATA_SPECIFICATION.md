@@ -1,0 +1,122 @@
+# Mission 7A — Content Metadata Specification
+
+## 1. Overview
+
+The content intake process uses a declarative **Owner Content Manifest** format defined by the JSON Schema at [`content/manifest.schema.json`](file:///home/vuld0/Lolixco/content/manifest.schema.json).
+
+This format provides:
+1. **Clean separation of concerns:** Public client metadata is decoupled from private curation, rights review, and technical encoding metrics.
+2. **Schema-enforced integrity:** Types, value ranges, string lengths, and aspect ratios are deterministically validated before ingestion.
+3. **Owner-editable JSON workflow:** Editors work with structured JSON documents rather than modifying TypeScript application code directly.
+
+---
+
+## 2. Root Manifest Envelope
+
+```json
+{
+  "$schema": "./manifest.schema.json",
+  "manifestVersion": "1.0.0",
+  "catalogVersion": "catalog-v2",
+  "generatedAt": "2026-10-18T12:00:00Z",
+  "description": "Lolixco owner-curated media intake manifest",
+  "items": [ /* array of ContentRecord objects */ ]
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `$schema` | `string` | No | Path to schema definition (enables editor autocomplete). |
+| `manifestVersion` | `string` | Yes | Semantic version of the manifest format (`1.0.0`). |
+| `catalogVersion` | `string` | Yes | Target catalog release identifier (e.g. `catalog-v2`). |
+| `generatedAt` | `string` | No | RFC3339 timestamp of manifest generation. |
+| `description` | `string` | No | Contextual note regarding this content batch. |
+| `items` | `array` | Yes | Array of content record definitions. |
+
+---
+
+## 3. Content Record Specification (`ContentRecord`)
+
+Each entry in `items` represents a single curated landscape video or portrait Short.
+
+### 3.1 Public Metadata Fields
+
+These fields are projected to client bundles and visible to platform visitors:
+
+| Field | Type | Format / Constraints | Description |
+| :--- | :--- | :--- | :--- |
+| `id` | `integer` | `>= 0`, unique | Numeric ID. `0-16` are reserved for demo items. Recommended: `100-199` for landscape videos, `200-299` for portrait shorts. |
+| `format` | `string` | `"video"` \| `"short"` | Presentation format. Standard landscape (`16:9`) or vertical Short (`9:16`). |
+| `title` | `string` | `3` to `100` chars | Display title. |
+| `description` | `string` | `5` to `1000` chars | Descriptive summary shown on video player and Shorts viewer. |
+| `category` | `string` | Enum: `Anime`, `Gaming`, `Movies`, `Series`, `Phonk`, `Multifandom`, `Cinematic` | Primary category. `Cinematic` is strictly prohibited for new content (`id >= 17`). |
+| `fandomIds` | `string[]` | Registered slug IDs | Optional array of fandom slugs registered in `FANDOM_REGISTRY`. Must be compatible with `category` unless `Multifandom`. |
+| `tags` | `string[]` | `^[a-z0-9_-]+$` | Array of search tags (lowercase, no leading `#`). At least 1 required. |
+| `poster` | `string` | Valid image file path | URL or local path (`/media/...`) to card poster image (`.svg`, `.png`, `.jpg`, `.webp`). |
+| `source` | `string` | Valid video file path | URL or local path (`/media/...`) to video file (`.mp4`, `.webm`, `.m4v`). |
+| `duration` | `string` | `^[0-9]+:[0-5][0-9]$` | Human-readable duration (e.g. `"0:24"`, `"1:45"`). |
+| `durationMs` | `integer` | `1` to `3600000` | Optional exact duration in milliseconds. |
+| `trending` | `boolean` | `true` \| `false` | Initial editorial placement in Trending row (default: `false`). |
+
+---
+
+### 3.2 Technical Media Metadata (`media`)
+
+Optional technical specifications used for media validation and player performance tuning:
+
+| Field | Type | Values | Description |
+| :--- | :--- | :--- | :--- |
+| `aspectRatio` | `string` | `"16:9"` \| `"9:16"` \| `"4:3"` \| `"2.39:1"` | Enforces format consistency (`16:9` for video, `9:16` for short). |
+| `width` | `integer` | `320` to `7680` | Frame width in pixels. |
+| `height` | `integer` | `320` to `4320` | Frame height in pixels. |
+| `codec` | `string` | `"h264"` \| `"hevc"` \| `"av1"` \| `"vp9"` \| `"vp8"` | Video compression format. |
+| `audioCodec` | `string` | `"aac"` \| `"opus"` \| `"mp3"` \| `"none"` | Audio compression format. |
+| `frameRate` | `number` | `23.976` to `120` | Video frame rate. |
+| `bitrateKbps` | `integer` | `100` to `100000` | Target encoding bitrate in kbps. |
+| `loudnessLkfs` | `number` | `-30` to `-5` | Integrated loudness (recommended: `-14 LKFS`). |
+
+---
+
+### 3.3 Private Editorial Metadata (`editorial`)
+
+**Critical Architectural Constraint:** Private editorial metadata is used for internal review, license verification, and curation tracking. It is **strictly stripped** before public client bundle generation.
+
+| Field | Type | Values | Description |
+| :--- | :--- | :--- | :--- |
+| `reviewStatus` | `string` | `"draft"` \| `"reviewed"` \| `"approved"` \| `"rejected"` \| `"published"` | Workflow review stage. Items cannot be published without `approved` or `published` status. |
+| `rightsCleared` | `boolean` | `true` \| `false` | Confirms copyright clearance, digital release, or license verification. |
+| `sourceAttribution` | `string` | Up to `500` chars | Internal record of creator identity, original platform link, or license terms. **Never exposed to public users.** |
+| `curatorNotes` | `string` | Up to `1000` chars | Internal notes regarding pacing, cut rhythm, audio quality, or feature placement. |
+| `ownerAssetRef` | `string` | Up to `100` chars | Owner batch inventory identifier (e.g. `BATCH01_LANDSCAPE_01`). |
+
+---
+
+## 4. Public Client Projection
+
+When compiling or generating the live catalog [`src/data/edits.ts`](file:///home/vuld0/Lolixco/src/data/edits.ts), the validation utility function [`projectToPublicEdit`](file:///home/vuld0/Lolixco/scripts/validate-content.mjs) projects the manifest record into the clean public `Edit` model:
+
+```typescript
+export function projectToPublicEdit(item: ContentRecord): Edit {
+  return {
+    id: item.id,
+    title: item.title,
+    category: item.category,
+    tags: item.tags,
+    description: item.description,
+    creator: "Lolixco curated", // Uniform public display name
+    poster: item.poster,
+    source: item.source,
+    duration: item.duration,
+    trending: item.trending ?? false,
+    format: item.format,
+    ...(item.fandomIds?.length ? { fandomIds: item.fandomIds } : {}),
+  };
+}
+```
+
+This guarantees:
+1. Zero leakage of private review statuses, rights notes, or internal curator remarks.
+2. Complete exclusion of creator personal details from public search indexes and cards.
+3. Full backward compatibility with the existing TypeScript `Edit` interface and feed compositor.

@@ -1,0 +1,71 @@
+{
+  "$schema": "./manifest.schema.json",
+  "manifestVersion": "1.0.0",
+  "catalogVersion": "catalog-v2",
+  "generatedAt": "2026-10-18T12:00:00Z",
+  "description": "Lolixco owner-curated media intake template. Edit this manifest to add authentic landscape videos and portrait Shorts.",
+  "items": [
+    {
+      "id": 100,
+      "format": "video",
+      "title": "Gojo Void Hollow Domain Expansion",
+      "description": "High-octane supernatural kinetic animation focusing on Satoru Gojo's domain activation and blue reversal sequence.",
+      "category": "Anime",
+      "fandomIds": ["jujutsu-kaisen"],
+      "tags": ["anime", "gojo", "jjk", "combat", "supernatural", "domain"],
+      "poster": "/media/posters/video-100-gojo.webp",
+      "source": "/media/videos/video-100-gojo.mp4",
+      "duration": "0:38",
+      "durationMs": 38000,
+      "trending": false,
+      "media": {
+        "aspectRatio": "16:9",
+        "width": 1920,
+        "height": 1080,
+        "codec": "h264",
+        "audioCodec": "aac",
+        "frameRate": 60,
+        "bitrateKbps": 8500,
+        "loudnessLkfs": -14
+      },
+      "editorial": {
+        "reviewStatus": "approved",
+        "rightsCleared": true,
+        "sourceAttribution": "Owner licensed collaboration; rights verified for streaming.",
+        "curatorNotes": "Primary discovery hero candidate. Superb keyframe pacing and sound design.",
+        "ownerAssetRef": "BATCH01_LANDSCAPE_01"
+      }
+    },
+    {
+      "id": 200,
+      "format": "short",
+      "title": "Jett Ace Clutch Ascent",
+      "description": "Fast-paced vertical tactical edit highlighting precision blade throws and dash resets on Ascent A-site.",
+      "category": "Gaming",
+      "fandomIds": ["valorant"],
+      "tags": ["gaming", "valorant", "jett", "clutch", "ascent", "ace"],
+      "poster": "/media/posters/short-200-jett.webp",
+      "source": "/media/videos/short-200-jett.mp4",
+      "duration": "0:24",
+      "durationMs": 24000,
+      "trending": true,
+      "media": {
+        "aspectRatio": "9:16",
+        "width": 1080,
+        "height": 1920,
+        "codec": "h264",
+        "audioCodec": "aac",
+        "frameRate": 60,
+        "bitrateKbps": 6000,
+        "loudnessLkfs": -14
+      },
+      "editorial": {
+        "reviewStatus": "approved",
+        "rightsCleared": true,
+        "sourceAttribution": "Direct creator submission; signed digital media release on file.",
+        "curatorNotes": "High vertical retention edit; beat-synced cuts align with operator shots.",
+        "ownerAssetRef": "BATCH01_SHORTS_01"
+      }
+    }
+  ]
+}

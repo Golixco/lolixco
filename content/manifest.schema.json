@@ -1,0 +1,210 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LolixcoContentManifest",
+  "description": "Schema for Lolixco owner-curated video and shorts content manifest",
+  "type": "object",
+  "required": ["manifestVersion", "catalogVersion", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "manifestVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "catalogVersion": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "description": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ContentRecord"
+      }
+    }
+  },
+  "definitions": {
+    "ContentRecord": {
+      "type": "object",
+      "required": [
+        "id",
+        "format",
+        "title",
+        "description",
+        "category",
+        "tags",
+        "poster",
+        "source",
+        "duration"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Stable unique numeric identifier. IDs 0-16 are reserved for baseline demo edits. Recommended 100-199 for curated landscape videos and 200-299 for curated portrait shorts."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["video", "short"],
+          "description": "Content presentation format: standard landscape video (16:9) or vertical Short (9:16)."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 100,
+          "description": "Display title for the edit (3 to 100 characters)."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000,
+          "description": "Visitor-facing descriptive text."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "Anime",
+            "Movies",
+            "Series",
+            "Multifandom",
+            "Gaming",
+            "Phonk",
+            "Cinematic"
+          ],
+          "description": "Canonical primary category. 'Cinematic' is a legacy category reserved strictly for demo edits (IDs 0-16)."
+        },
+        "fandomIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_-]+$"
+          },
+          "description": "Optional list of canonical fandom slug IDs registered in FANDOM_REGISTRY (e.g. 'jujutsu-kaisen', 'valorant')."
+        },
+        "tags": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_-]+$"
+          },
+          "description": "Array of lowercase search tags without hash symbols (e.g. ['anime', 'gojo', 'domain'])."
+        },
+        "poster": {
+          "type": "string",
+          "pattern": "^(\\/|https?:\\/\\/|\\.\\/).+\\.(svg|png|jpg|jpeg|webp)$",
+          "description": "Asset path or URL for the preview poster card image."
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^(\\/|https?:\\/\\/|\\.\\/).+\\.(mp4|webm|m4v)$",
+          "description": "Asset path or URL for the media video file."
+        },
+        "duration": {
+          "type": "string",
+          "pattern": "^[0-9]+:[0-5][0-9]$",
+          "description": "Display duration formatted as M:SS or MM:SS (e.g. '0:24', '1:45')."
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000,
+          "description": "Optional exact duration in milliseconds (positive integer, max 1 hour)."
+        },
+        "trending": {
+          "type": "boolean",
+          "default": false,
+          "description": "Editorial flag indicating initial trending placement."
+        },
+        "media": {
+          "$ref": "#/definitions/MediaTechnicalMetadata"
+        },
+        "editorial": {
+          "$ref": "#/definitions/EditorialProvenanceMetadata"
+        }
+      }
+    },
+    "MediaTechnicalMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "aspectRatio": {
+          "type": "string",
+          "enum": ["16:9", "9:16", "4:3", "2.39:1"]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 320,
+          "maximum": 7680
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 320,
+          "maximum": 4320
+        },
+        "codec": {
+          "type": "string",
+          "enum": ["h264", "hevc", "av1", "vp9", "vp8"]
+        },
+        "audioCodec": {
+          "type": "string",
+          "enum": ["aac", "opus", "mp3", "none"]
+        },
+        "frameRate": {
+          "type": "number",
+          "minimum": 23.976,
+          "maximum": 120
+        },
+        "bitrateKbps": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 100000
+        },
+        "loudnessLkfs": {
+          "type": "number",
+          "minimum": -30,
+          "maximum": -5,
+          "description": "Integrated loudness in LKFS/LUFS. Recommended target: -14 LKFS."
+        }
+      }
+    },
+    "EditorialProvenanceMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewStatus": {
+          "type": "string",
+          "enum": ["draft", "reviewed", "approved", "rejected", "published"]
+        },
+        "rightsCleared": {
+          "type": "boolean",
+          "description": "Whether rights or license permissions have been verified and documented."
+        },
+        "sourceAttribution": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Private creator or source attribution record (NOT exposed on public client cards or search)."
+        },
+        "curatorNotes": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Private editorial notes regarding edit quality, cut pacing, or sound balance."
+        },
+        "ownerAssetRef": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Owner internal asset reference ID (e.g. 'BATCH01_LANDSCAPE_01')."
+        }
+      }
+    }
+  }
+}
