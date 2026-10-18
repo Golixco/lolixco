@@ -22,7 +22,7 @@
 | **Local Offline Fallback** | Fully Implemented & Tested | `src/api/recommendations.ts` | `tests/recommendations.test.mjs` | Fallback works synchronously when backend is offline. | **Low:** Zero external dependencies. |
 | **Catalog Drift Validation** | Fully Implemented & Tested | `server/recsys/export_catalog.py` | `server/recsys/tests/test_drift.py` | Enforces exact match between TypeScript edits and snapshot at `server/recsys/catalog_snapshot.json` (17 edits). | **High:** Modifying catalog requires running export script. |
 | **Mobile Navigation & Layout** | Fully Implemented & Tested | `src/App.tsx`<br>`src/components/layout/Sidebar.tsx`<br>`src/styles/index.css` | Manual responsive audit & media queries | Category and fandom bars support touch scrolling; sidebar becomes modal drawer on `<768px`. | **Low:** CSS media queries well-structured. |
-| **Account-Free UI Alignment** | Cleaned in Mission 6B | `src/App.tsx`<br>`src/components/layout/Header.tsx`<br>`src/components/layout/Sidebar.tsx` | `tests/fandoms.test.mjs` | Obsolete "Sign In", "Sign Up", member-preview dialogs, and profile avatars removed. Public creator names removed from cards. "Following" and "Library" removed. | **Low:** Honest placeholders maintained for Creator Studio & Immersion. |
+| **Account-Free UI Alignment** | Cleaned in Mission 6B | `src/App.tsx`<br>`src/components/layout/Header.tsx`<br>`src/components/layout/Sidebar.tsx`<br>`src/components/video/VideoPlayer.tsx` | `tests/fandoms.test.mjs` | Obsolete "Sign In", "Sign Up", member-preview dialogs, and profile avatars removed. Public creator names and avatars removed from both cards and the featured VideoPlayer. "Following" and "Library" removed. | **Low:** Honest placeholders maintained for Creator Studio & Immersion. |
 
 ---
 
@@ -71,7 +71,7 @@
 ### F. Product Alignment & Account-Free Execution
 - **Header:** Zero sign-in or registration controls. Clean search and help shortcut trigger.
 - **Sidebar:** Removed account-dependent "Following" and "Library". Maintained honest placeholders for Creator Studio (temporary in-browser AI video analysis) and Immersion Mode.
-- **Card Metadata:** `edit.creator` is omitted from public cards.
+- **Public Metadata & Creator Removal:** `edit.creator` and avatar elements have been completely removed from public UI rendering across both `VideoCard` and the featured `VideoPlayer` (replaced with content category and sample edit indicators). Internal `creator` metadata is strictly retained for the Python recommendation engine. Private marker regression tests verify no creator data leaks into public markup.
 - **Honest Labels:** Demo collections avoid claiming unverified "Trending" viewer metrics, presenting honest curated demo highlights.
 
 ---

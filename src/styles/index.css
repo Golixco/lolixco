@@ -377,6 +377,14 @@ main {
   text-transform: uppercase;
   margin: 7px 0 10px;
 }
+.hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: #bec3ca;
+  margin-bottom: 6px;
+}
 .creator {
   display: flex;
   align-items: center;

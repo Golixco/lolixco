@@ -103,16 +103,16 @@ export function getFandomById(fandomId: string): Fandom | undefined {
 
 /**
  * Check if a fandom ID is compatible with an active category.
- * If category is 'All', any valid registered fandom is compatible.
+ * Note: 'All' is a top-level category overview without sub-fandom navigation chips.
+ * Under 'All', no fandom filter can be active, ensuring all active filters are visible.
  */
 export function isFandomCompatibleWithCategory(
   fandomId: string,
   category: string
 ): boolean {
-  if (!fandomId) return false;
+  if (!fandomId || !category || category === "All") return false;
   const fandom = getFandomById(fandomId);
   if (!fandom) return false;
-  if (!category || category === "All") return true;
   return fandom.categories.some(
     (cat) => cat.toLowerCase() === category.toLowerCase()
   );

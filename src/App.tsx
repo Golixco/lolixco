@@ -19,31 +19,68 @@ import {
 import { useDiscoveryFeed } from "./hooks/useDiscoveryFeed";
 import { useRecommendations } from "./hooks/useRecommendations";
 
-function parseUrlParams(): { category: string; fandom: string; query: string } {
+function parseUrlParams(): {
+  category: string;
+  fandom: string;
+  query: string;
+  view: string;
+} {
   if (typeof window === "undefined") {
-    return { category: "All", fandom: "", query: "" };
+    return { category: "All", fandom: "", query: "", view: "Home" };
   }
   const params = new URLSearchParams(window.location.search);
   const rawCat = params.get("category") || params.get("cat") || "";
   const rawFandom = params.get("fandom") || "";
   const rawQ = params.get("q") || params.get("query") || "";
+  const rawView = params.get("view") || "";
 
-  const normCat = normalizeCategoryCase(rawCat) || "All";
-  const normFandom = isFandomCompatibleWithCategory(rawFandom, normCat)
-    ? rawFandom.trim().toLowerCase()
-    : "";
+  let normCat = normalizeCategoryCase(rawCat);
+  const fandomMeta = rawFandom ? getFandomById(rawFandom.trim()) : undefined;
+
+  let normFandom = "";
+  if (fandomMeta) {
+    if (!normCat) {
+      // Direct URL ?fandom=valorant without category: resolve to primary category
+      normCat = fandomMeta.categories[0] || "All";
+      normFandom = fandomMeta.id;
+    } else if (normCat === "All") {
+      // Top-level 'All' does not allow active fandom filter (avoids hidden filter states)
+      normFandom = "";
+    } else if (isFandomCompatibleWithCategory(fandomMeta.id, normCat)) {
+      normFandom = fandomMeta.id;
+    } else {
+      // Incompatible fandom with specified category: clear fandom
+      normFandom = "";
+    }
+  }
+
+  if (!normCat) {
+    normCat = "All";
+  }
+
+  const normView = rawView.toLowerCase() === "explore" ? "Explore" : "Home";
 
   return {
     category: normCat,
     fandom: normFandom,
     query: rawQ.trim(),
+    view: normView,
   };
 }
 
-function syncUrl(cat: string, fan: string, q: string, usePush: boolean) {
+function syncUrl(
+  cat: string,
+  fan: string,
+  q: string,
+  view: string,
+  usePush: boolean
+) {
   if (typeof window === "undefined") return;
 
   const params = new URLSearchParams();
+  if (view && view.toLowerCase() === "explore") {
+    params.set("view", "explore");
+  }
   if (cat && cat !== "All" && cat !== "Featured") {
     params.set("category", cat);
   }
@@ -78,7 +115,7 @@ export default function App() {
   const [category, setCategory] = useState(initialParams.category);
   const [fandom, setFandom] = useState(initialParams.fandom);
   const [selected, setSelected] = useState(edits[0]);
-  const [active, setActive] = useState("Home");
+  const [active, setActive] = useState(initialParams.view);
   const [modal, setModal] = useState("");
 
   useEffect(() => {
@@ -91,13 +128,20 @@ export default function App() {
     return () => mq.removeEventListener("change", change);
   }, []);
 
+  // Normalize initial URL if it contains direct fandom without category or incompatible params
+  useEffect(() => {
+    const current = parseUrlParams();
+    syncUrl(current.category, current.fandom, current.query, current.view, false);
+  }, []);
+
   // Synchronize browser history navigation (Back / Forward)
   useEffect(() => {
     function handlePopState() {
-      const { category: c, fandom: f, query: q } = parseUrlParams();
+      const { category: c, fandom: f, query: q, view: v } = parseUrlParams();
       setCategory(c);
       setFandom(f);
       setQuery(q);
+      setActive(v);
     }
 
     window.addEventListener("popstate", handlePopState);
@@ -112,9 +156,9 @@ export default function App() {
         : "";
       setCategory(normCat);
       setFandom(newFandom);
-      syncUrl(normCat, newFandom, query, true);
+      syncUrl(normCat, newFandom, query, active, true);
     },
-    [fandom, query]
+    [active, fandom, query]
   );
 
   const handleFandomChange = useCallback(
@@ -122,39 +166,39 @@ export default function App() {
       const cleanFandom =
         newFandomId === "all" ? "" : newFandomId.trim().toLowerCase();
       setFandom(cleanFandom);
-      syncUrl(category, cleanFandom, query, true);
+      syncUrl(category, cleanFandom, query, active, true);
     },
-    [category, query]
+    [active, category, query]
   );
 
   const handleQueryChange = useCallback(
     (newQuery: string) => {
       setQuery(newQuery);
-      syncUrl(category, fandom, newQuery, false);
+      syncUrl(category, fandom, newQuery, active, false);
     },
-    [category, fandom]
+    [active, category, fandom]
   );
 
   const handleTagClick = useCallback(
     (tag: string) => {
       const tagQuery = "#" + tag.toLowerCase().trim();
       setQuery(tagQuery);
-      syncUrl(category, fandom, tagQuery, true);
+      syncUrl(category, fandom, tagQuery, active, true);
     },
-    [category, fandom]
+    [active, category, fandom]
   );
 
   const handleClearFilters = useCallback(() => {
     setCategory("All");
     setFandom("");
     setQuery("");
-    syncUrl("All", "", "", true);
-  }, []);
+    syncUrl("All", "", "", active, true);
+  }, [active]);
 
   const handleClearFandom = useCallback(() => {
     setFandom("");
-    syncUrl(category, "", query, true);
-  }, [category, query]);
+    syncUrl(category, "", query, active, true);
+  }, [active, category, query]);
 
   function choose(edit: Edit) {
     setSelected(edit);
@@ -173,13 +217,13 @@ export default function App() {
       setQuery("");
       setCategory("All");
       setFandom("");
-      syncUrl("All", "", "", true);
+      syncUrl("All", "", "", "Home", true);
     } else if (name === "Explore") {
       setActive("Explore");
       setQuery("");
       setCategory("All");
       setFandom("");
-      syncUrl("All", "", "", true);
+      syncUrl("All", "", "", "Explore", true);
     } else {
       setModal(name);
     }
@@ -320,7 +364,7 @@ export default function App() {
                   setCategory("All");
                   setFandom("");
                   setActive("Home");
-                  syncUrl("All", "", "", true);
+                  syncUrl("All", "", "", "Home", true);
                 }}
                 onTagClick={handleTagClick}
               />
