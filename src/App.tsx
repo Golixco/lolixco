@@ -115,7 +115,8 @@ export function syncUrl(
   q: string,
   view: string,
   shortId: number | null | undefined,
-  usePush: boolean
+  usePush: boolean,
+  stateUpdate?: Record<string, unknown> | null
 ) {
   if (typeof window === "undefined") return;
 
@@ -141,13 +142,39 @@ export function syncUrl(
   const newSearch = params.toString() ? `?${params.toString()}` : "";
   const currentSearch = window.location.search;
 
-  if (newSearch === currentSearch) return;
+  const existingState: Record<string, unknown> =
+    window.history?.state && typeof window.history.state === "object"
+      ? { ...window.history.state }
+      : {};
+
+  let nextState: Record<string, unknown> | null = null;
+  if (stateUpdate === null) {
+    const cleaned = { ...existingState };
+    delete cleaned.viewerSessionId;
+    delete cleaned.viewerDepth;
+    nextState = Object.keys(cleaned).length > 0 ? cleaned : null;
+  } else if (stateUpdate !== undefined) {
+    nextState = { ...existingState, ...stateUpdate };
+  } else {
+    nextState = Object.keys(existingState).length > 0 ? existingState : null;
+  }
+
+  if (newSearch === currentSearch) {
+    if (!usePush && stateUpdate !== undefined && window.history?.replaceState) {
+      window.history.replaceState(
+        nextState,
+        "",
+        window.location.pathname + newSearch + window.location.hash
+      );
+    }
+    return;
+  }
 
   const targetUrl = window.location.pathname + newSearch + window.location.hash;
   if (usePush) {
-    window.history.pushState(null, "", targetUrl);
+    window.history.pushState(nextState, "", targetUrl);
   } else {
-    window.history.replaceState(null, "", targetUrl);
+    window.history.replaceState(nextState, "", targetUrl);
   }
 }
 
@@ -191,10 +218,9 @@ export default function App({
   });
   const [modal, setModal] = useState("");
 
-  // Tracks whether the current ShortsViewer session was initiated via in-app selection
-  const viewerOpenedInAppRef = useRef<boolean>(false);
-  // Tracks the number of history entries pushed during the active viewer session
-  const viewerDepthRef = useRef<number>(0);
+  // Active viewer session identifier and monotonic session counter
+  const viewerSessionIdRef = useRef<string | null>(null);
+  const sessionCounterRef = useRef<number>(0);
 
   useEffect(() => {
     const mq = matchMedia("(max-width:767px)");
@@ -221,7 +247,7 @@ export default function App({
 
   // Synchronize browser history navigation (Back / Forward)
   useEffect(() => {
-    function handlePopState() {
+    function handlePopState(e: PopStateEvent) {
       const {
         category: c,
         fandom: f,
@@ -233,18 +259,25 @@ export default function App({
       setFandom(f);
       setQuery(q);
       setActive(v);
+
+      const navState =
+        (e && e.state) ||
+        (typeof window !== "undefined" ? window.history?.state : null);
+      const destSessionId =
+        navState && typeof navState.viewerSessionId === "string"
+          ? navState.viewerSessionId
+          : null;
+
       if (typeof sId === "number") {
         const matchingShort =
           initialEdits.find((e) => e.id === sId && isShort(e)) || null;
         setActiveShort(matchingShort);
-        // If popstate transitioned between shorts while viewer was open, decrement depth
-        if (viewerDepthRef.current > 1) {
-          viewerDepthRef.current -= 1;
-        }
+        // Track the destination entry's viewer session if tagged
+        viewerSessionIdRef.current = destSessionId;
       } else {
+        // Destination entry is not a short (viewer closed via popstate)
         setActiveShort(null);
-        viewerDepthRef.current = 0;
-        viewerOpenedInAppRef.current = false;
+        viewerSessionIdRef.current = null;
       }
     }
 
@@ -321,10 +354,9 @@ export default function App({
   // Atomic hashtag navigation from within Shorts viewer
   const handleShortsViewerTagClick = useCallback(
     (tag: string) => {
-      // 1. Close the viewer and reset session tracking
+      // 1. Close the viewer and clear session tracking
+      viewerSessionIdRef.current = null;
       setActiveShort(null);
-      viewerDepthRef.current = 0;
-      viewerOpenedInAppRef.current = false;
       // 2. Prepare exact hashtag query: #tag
       const tagQuery = "#" + tag.toLowerCase().trim();
       setQuery(tagQuery);
@@ -333,8 +365,8 @@ export default function App({
       setFandom("");
       // 4. Navigate to Explore surface
       setActive("Explore");
-      // 5. Update URL clearing short= and syncing discovery query
-      syncUrl("All", "", tagQuery, "Explore", null, true);
+      // 5. Update URL clearing short= and syncing discovery query with cleared session state
+      syncUrl("All", "", tagQuery, "Explore", null, true, null);
     },
     []
   );
@@ -353,10 +385,13 @@ export default function App({
 
   const handleSelectShort = useCallback(
     (short: Edit) => {
-      viewerOpenedInAppRef.current = true;
-      viewerDepthRef.current = 1;
+      const newSessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+      viewerSessionIdRef.current = newSessionId;
       setActiveShort(short);
-      syncUrl(category, fandom, query, active, short.id, true);
+      syncUrl(category, fandom, query, active, short.id, true, {
+        viewerSessionId: newSessionId,
+        viewerDepth: 1,
+      });
     },
     [active, category, fandom, query]
   );
@@ -364,9 +399,26 @@ export default function App({
   // Synchronize Next / Previous inside ShortsViewer with URL and activeShort
   const handleShortChange = useCallback(
     (newShort: Edit) => {
-      viewerDepthRef.current += 1;
+      let sessionId = viewerSessionIdRef.current;
+      if (!sessionId) {
+        sessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+        viewerSessionIdRef.current = sessionId;
+      }
+      const curState =
+        typeof window !== "undefined" ? window.history?.state : null;
+      const curDepth =
+        curState &&
+        curState.viewerSessionId === sessionId &&
+        typeof curState.viewerDepth === "number"
+          ? curState.viewerDepth
+          : 1;
+      const nextDepth = curDepth + 1;
+
       setActiveShort(newShort);
-      syncUrl(category, fandom, query, active, newShort.id, true);
+      syncUrl(category, fandom, query, active, newShort.id, true, {
+        viewerSessionId: sessionId,
+        viewerDepth: nextDepth,
+      });
     },
     [active, category, fandom, query]
   );
@@ -379,22 +431,29 @@ export default function App({
       setActive("Home");
     }
 
-    if (viewerOpenedInAppRef.current && viewerDepthRef.current > 0) {
-      const depth = viewerDepthRef.current;
-      viewerDepthRef.current = 0;
-      viewerOpenedInAppRef.current = false;
+    const curState =
+      typeof window !== "undefined" ? window.history?.state : null;
+    const isAppSession =
+      viewerSessionIdRef.current &&
+      curState &&
+      curState.viewerSessionId === viewerSessionIdRef.current &&
+      typeof curState.viewerDepth === "number" &&
+      curState.viewerDepth > 0;
+
+    if (isAppSession) {
+      const depthToGo = curState.viewerDepth;
+      viewerSessionIdRef.current = null;
       if (
         typeof window !== "undefined" &&
         typeof window.history?.go === "function"
       ) {
-        window.history.go(-depth);
+        window.history.go(-depthToGo);
       } else {
-        syncUrl(category, fandom, query, nextView, null, false);
+        syncUrl(category, fandom, query, nextView, null, false, null);
       }
     } else {
-      viewerDepthRef.current = 0;
-      viewerOpenedInAppRef.current = false;
-      syncUrl(category, fandom, query, nextView, null, false);
+      viewerSessionIdRef.current = null;
+      syncUrl(category, fandom, query, nextView, null, false, null);
     }
   }, [active, category, catalogShorts.length, fandom, query]);
 
@@ -432,11 +491,17 @@ export default function App({
       setFandom("");
       if (catalogShorts.length > 0) {
         const firstShort = catalogShorts[0];
+        const newSessionId = `vs-${Date.now()}-${++sessionCounterRef.current}`;
+        viewerSessionIdRef.current = newSessionId;
         setActiveShort(firstShort);
-        syncUrl("All", "", "", "Shorts", firstShort.id, true);
+        syncUrl("All", "", "", "Shorts", firstShort.id, true, {
+          viewerSessionId: newSessionId,
+          viewerDepth: 1,
+        });
       } else {
         setActiveShort(null);
-        syncUrl("All", "", "", "Shorts", null, true);
+        viewerSessionIdRef.current = null;
+        syncUrl("All", "", "", "Shorts", null, true, null);
       }
     } else {
       setModal(name);

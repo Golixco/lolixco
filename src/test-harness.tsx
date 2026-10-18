@@ -7,6 +7,8 @@ import "@fontsource/rajdhani/600.css";
 import "@fontsource/rajdhani/700.css";
 import "./styles/index.css";
 import type { Edit } from "./data/edits";
+import { edits } from "./data/edits";
+import App from "./App";
 import { ShortsViewer } from "./components/shorts/ShortsViewer";
 import { ShortsShelf } from "./components/shorts/ShortsShelf";
 
@@ -41,10 +43,10 @@ export const TEST_FIXTURE_SHORTS: Edit[] = [
     format: "short",
   },
   {
-    id: 0,
-    title: "Zero Origin",
+    id: 103,
+    title: "Cyber Rush",
     creator: "Internal Studio Test",
-    description: "Short with numeric ID 0 verification test fixture.",
+    description: "Futuristic neon drift vertical edit.",
     category: "Movies",
     fandomIds: ["spider-man"],
     tags: ["movies", "spiderman"],
@@ -180,13 +182,13 @@ function TestHarness() {
           Open Short #100 (Shadow Strike)
         </button>
         <button
-          id="btn-open-0"
+          id="btn-open-103"
           type="button"
           className="primary"
           style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer" }}
           onClick={() => handleSelectShort(fixtureShorts[2])}
         >
-          Open Short #0 (Numeric ID 0)
+          Open Short #103 (Cyber Rush)
         </button>
         <button
           id="btn-open-error"
@@ -268,7 +270,77 @@ function TestHarness() {
   );
 }
 
+function TestHarnessRoot() {
+  const [viewMode, setViewMode] = useState<"app" | "diagnostics">(() => {
+    const p = new URLSearchParams(window.location.search);
+    return p.get("mode") === "diagnostics" ? "diagnostics" : "app";
+  });
+
+  return (
+    <>
+      <div
+        id="harness-bar"
+        style={{
+          background: "#0f172a",
+          borderBottom: "1px solid #334155",
+          padding: "8px 16px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          fontSize: "12px",
+          color: "#94a3b8",
+          position: "sticky",
+          top: 0,
+          zIndex: 99999,
+        }}
+      >
+        <span>
+          <strong style={{ color: "#38bdf8" }}>Lolixco Test Environment:</strong>{" "}
+          Active: <strong style={{ color: "#facc15" }}>{viewMode === "app" ? "Live App Mode (Synthetic Shorts)" : "Component Diagnostics"}</strong>
+        </span>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button
+            id="btn-switch-app"
+            type="button"
+            style={{
+              padding: "4px 8px",
+              background: viewMode === "app" ? "#0284c7" : "#1e293b",
+              color: "#fff",
+              border: "1px solid #475569",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+            onClick={() => setViewMode("app")}
+          >
+            Live App Mode
+          </button>
+          <button
+            id="btn-switch-diagnostics"
+            type="button"
+            style={{
+              padding: "4px 8px",
+              background: viewMode === "diagnostics" ? "#0284c7" : "#1e293b",
+              color: "#fff",
+              border: "1px solid #475569",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+            onClick={() => setViewMode("diagnostics")}
+          >
+            Component Diagnostics
+          </button>
+        </div>
+      </div>
+      {viewMode === "app" ? (
+        <App initialEdits={[...edits, ...TEST_FIXTURE_SHORTS]} />
+      ) : (
+        <TestHarness />
+      )}
+    </>
+  );
+}
+
 const rootEl = document.getElementById("root");
 if (rootEl) {
-  createRoot(rootEl).render(<TestHarness />);
+  createRoot(rootEl).render(<TestHarnessRoot />);
 }

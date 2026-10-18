@@ -40,9 +40,9 @@ const SYNTHETIC_SHORTS = [
     format: "short",
   },
   {
-    id: 0,
-    title: "Zero Origin",
-    description: "Short with numeric ID 0 test",
+    id: 102,
+    title: "Cyber Rush",
+    description: "Futuristic neon drift vertical edit",
     category: "Movies",
     fandomIds: ["spider-man"],
     tags: ["movies", "spiderman"],
@@ -61,9 +61,13 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
 
   const historyState = {
     historyStack: [urlObj.href],
+    stateStack: [null],
     pointer: 0,
     get url() {
       return this.historyStack[this.pointer];
+    },
+    get state() {
+      return this.stateStack[this.pointer];
     },
     get search() {
       return new URL(this.url).search;
@@ -79,20 +83,29 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
   };
 
   const history = {
-    pushState(_state, _title, url) {
+    get state() {
+      return historyState.state;
+    },
+    pushState(state, _title, url) {
       historyState.pushCount++;
       const u = new URL(url, historyState.url);
       historyState.historyStack = historyState.historyStack.slice(
         0,
         historyState.pointer + 1
       );
+      historyState.stateStack = historyState.stateStack.slice(
+        0,
+        historyState.pointer + 1
+      );
       historyState.historyStack.push(u.href);
+      historyState.stateStack.push(state ? JSON.parse(JSON.stringify(state)) : null);
       historyState.pointer = historyState.historyStack.length - 1;
     },
-    replaceState(_state, _title, url) {
+    replaceState(state, _title, url) {
       historyState.replaceCount++;
       const u = new URL(url, historyState.url);
       historyState.historyStack[historyState.pointer] = u.href;
+      historyState.stateStack[historyState.pointer] = state ? JSON.parse(JSON.stringify(state)) : null;
     },
     back() {
       this.go(-1);
@@ -106,7 +119,11 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
       if (nextPointer >= 0 && nextPointer < historyState.historyStack.length) {
         historyState.pointer = nextPointer;
         const listeners = globalThis._windowListeners?.get("popstate") || [];
-        listeners.forEach(({ fn }) => fn(new Event("popstate")));
+        listeners.forEach(({ fn }) => {
+          const evt = new Event("popstate");
+          evt.state = historyState.state;
+          fn(evt);
+        });
       }
     },
   };
@@ -535,7 +552,7 @@ test("ShortsShelf: renders horizontal track, controls, and items when items exis
   assert.ok(html.includes('aria-label="Curated Shorts carousel"'));
   assert.ok(html.includes("Shadow Strike"));
   assert.ok(html.includes("Domain Expansion"));
-  assert.ok(html.includes("Zero Origin"));
+  assert.ok(html.includes("Cyber Rush"));
 });
 
 // ---------------------------------------------------------------------------
@@ -598,11 +615,22 @@ test("ShortsViewer: provides keyboard shortcuts, playback controls, and focus cl
 
 test("ShortsViewer: handles ID 0 correctly as a valid short ID", async () => {
   const { container, root, cleanup } = setupMountedDom();
+  const zeroShort = {
+    id: 0,
+    title: "Zero Origin",
+    description: "Zero short description",
+    category: "Gaming",
+    tags: ["gaming"],
+    poster: "/media/art-0.svg",
+    source: "/media/silent-test-loop.webm",
+    duration: "0:15",
+    format: "short",
+  };
 
   await act(async () => {
     root.render(
       React.createElement(ShortsViewer, {
-        shorts: SYNTHETIC_SHORTS,
+        shorts: [zeroShort, ...SYNTHETIC_SHORTS],
         initialShortId: 0,
         onClose: () => {},
       })
@@ -610,7 +638,7 @@ test("ShortsViewer: handles ID 0 correctly as a valid short ID", async () => {
   });
 
   assert.ok(container.textContent.includes("Zero Origin"));
-  assert.ok(container.textContent.includes("3 / 3"));
+  assert.ok(container.textContent.includes("1 / 4"));
 
   await cleanup();
 });
@@ -699,22 +727,26 @@ test("Production Invariant: production catalog has 17 items and 0 shorts", () =>
 // ---------------------------------------------------------------------------
 
 test("FIX A: parseAndValidateShortId strictly rejects invalid IDs and preserves ID 0", () => {
+  const catalogWithZero = [
+    ...SYNTHETIC_SHORTS,
+    { id: 0, title: "Zero Origin", format: "short" },
+  ];
   // Valid short IDs
-  assert.equal(parseAndValidateShortId("100", SYNTHETIC_SHORTS), 100);
-  assert.equal(parseAndValidateShortId("101", SYNTHETIC_SHORTS), 101);
-  assert.equal(parseAndValidateShortId("0", SYNTHETIC_SHORTS), 0, "Numeric ID 0 must be strictly valid");
-  assert.equal(parseAndValidateShortId(" 100 ", SYNTHETIC_SHORTS), 100, "Whitespace trimmed");
+  assert.equal(parseAndValidateShortId("100", catalogWithZero), 100);
+  assert.equal(parseAndValidateShortId("101", catalogWithZero), 101);
+  assert.equal(parseAndValidateShortId("0", catalogWithZero), 0, "Numeric ID 0 must be strictly valid");
+  assert.equal(parseAndValidateShortId(" 100 ", catalogWithZero), 100, "Whitespace trimmed");
 
   // Invalid IDs
-  assert.equal(parseAndValidateShortId(null, SYNTHETIC_SHORTS), null);
-  assert.equal(parseAndValidateShortId("", SYNTHETIC_SHORTS), null);
-  assert.equal(parseAndValidateShortId("-1", SYNTHETIC_SHORTS), null, "Negative IDs rejected");
-  assert.equal(parseAndValidateShortId("1.5", SYNTHETIC_SHORTS), null, "Fractional/decimal IDs rejected");
-  assert.equal(parseAndValidateShortId("abc", SYNTHETIC_SHORTS), null, "Non-numeric strings rejected");
-  assert.equal(parseAndValidateShortId("100abc", SYNTHETIC_SHORTS), null, "Trailing letters rejected");
-  assert.equal(parseAndValidateShortId("1e2", SYNTHETIC_SHORTS), null, "Scientific notation rejected");
-  assert.equal(parseAndValidateShortId("9007199254740992", SYNTHETIC_SHORTS), null, "Unsafe integers rejected");
-  assert.equal(parseAndValidateShortId("9999", SYNTHETIC_SHORTS), null, "Unknown IDs not in catalog rejected");
+  assert.equal(parseAndValidateShortId(null, catalogWithZero), null);
+  assert.equal(parseAndValidateShortId("", catalogWithZero), null);
+  assert.equal(parseAndValidateShortId("-1", catalogWithZero), null, "Negative IDs rejected");
+  assert.equal(parseAndValidateShortId("1.5", catalogWithZero), null, "Fractional/decimal IDs rejected");
+  assert.equal(parseAndValidateShortId("abc", catalogWithZero), null, "Non-numeric strings rejected");
+  assert.equal(parseAndValidateShortId("100abc", catalogWithZero), null, "Trailing letters rejected");
+  assert.equal(parseAndValidateShortId("1e2", catalogWithZero), null, "Scientific notation rejected");
+  assert.equal(parseAndValidateShortId("9007199254740992", catalogWithZero), null, "Unsafe integers rejected");
+  assert.equal(parseAndValidateShortId("9999", catalogWithZero), null, "Unknown IDs not in catalog rejected");
 
   // Non-short video ID rejection (e.g. landscape edit ID 1)
   assert.equal(parseAndValidateShortId("1", edits), null, "Landscape video IDs rejected as Shorts");
@@ -1299,7 +1331,7 @@ test("V3 FIX B: Filtered Shorts navigation scope: Deep link outside active filte
 
 test("V3 FIX B: Filtered Shorts navigation scope: Short ID 0 is accurately preserved in filtered navigation", async () => {
   const movieShort0 = { id: 0, title: "Zero Origin", category: "Movies", fandomIds: ["spider-man"], tags: ["spiderman"], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
-  const testCatalog = [...edits, movieShort0];
+  const testCatalog = [...edits.filter((e) => e.id !== 0), movieShort0];
 
   const { container, root, cleanup } = setupMountedDom("http://localhost:3000/?view=shorts&category=Movies");
 
@@ -1606,6 +1638,317 @@ test("V3 FIX E: Recoverable media test: video playback recovers successfully aft
   });
 
   assert.ok(!container.textContent.includes("Video unavailable"), "Error overlay must clear on recovery");
+
+  await cleanup();
+});
+
+// ===========================================================================
+// MISSION 6C: FINAL V4 TARGETED CORRECTNESS TEST SUITES
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 14. REVIEW V4 FIX 1: History Depth Across Back AND Forward
+// ---------------------------------------------------------------------------
+
+test("V4 FIX 1: Home → 100 → 101 → Close → Home", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  const card100 = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  assert.ok(card100, "Card 100 must exist");
+
+  await act(async () => {
+    card100.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.search, "?short=100");
+  assert.equal(historyState.pointer, 1);
+
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.pointer, 0);
+  assert.equal(historyState.search, "");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0);
+
+  await cleanup();
+});
+
+test("V4 FIX 1: Home → 100 → 101 → Back → Forward → Close → Home", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // 1. Open 100
+  const card100 = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  await act(async () => {
+    card100.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=100");
+  assert.equal(historyState.pointer, 1);
+
+  // 2. Next to 101
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+
+  // 3. Browser Back to 100
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(historyState.search, "?short=100");
+  assert.equal(historyState.pointer, 1);
+  assert.ok(container.textContent.includes("Shadow Strike"));
+
+  // 4. Browser Forward to 101
+  await act(async () => {
+    globalThis.history.forward();
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+  assert.ok(container.textContent.includes("Domain Expansion"));
+
+  // 5. Close viewer -> Must return Home (pointer 0), not back to 100!
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.pointer, 0, "History pointer must rewind to Home");
+  assert.equal(historyState.search, "", "URL must return to Home");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0, "Viewer must be closed");
+
+  await cleanup();
+});
+
+test("V4 FIX 1: Home → 100 → 101 → 102 → Back → Back → Forward → Close → Home", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // Open 100
+  const card100 = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  await act(async () => {
+    card100.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // Next to 101
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // Next to 102
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=102");
+  assert.equal(historyState.pointer, 3);
+
+  // Back to 101
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+
+  // Back to 100
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(historyState.search, "?short=100");
+  assert.equal(historyState.pointer, 1);
+
+  // Forward to 101
+  await act(async () => {
+    globalThis.history.forward();
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+
+  // Close viewer
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.pointer, 0, "Must return to Home at pointer 0");
+  assert.equal(historyState.search, "");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0);
+
+  await cleanup();
+});
+
+test("V4 FIX 1: Home → 100 → 101 → Back → Next → Close → Home", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // Open 100
+  const card100 = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  await act(async () => {
+    card100.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // Next to 101
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+
+  // Back to 100
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(historyState.search, "?short=100");
+  assert.equal(historyState.pointer, 1);
+
+  // Click Next in viewer -> pushes fresh forward entry
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+
+  // Close viewer
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.pointer, 0, "Must return to Home at pointer 0");
+  assert.equal(historyState.search, "");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0);
+
+  await cleanup();
+});
+
+test("V4 FIX 1: Direct-link entry → Close", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/?short=101");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 0);
+  assert.ok(container.textContent.includes("Domain Expansion"));
+
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.pointer, 0, "Must remain at pointer 0 without jumping out of app");
+  assert.equal(historyState.search, "");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0);
+
+  await cleanup();
+});
+
+test("V4 FIX 1: Enter Shorts from Sidebar → Close", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  const shortsBtn = findButtonsByText(container, "Shorts")[0];
+  assert.ok(shortsBtn, "Shorts sidebar button must exist");
+
+  await act(async () => {
+    shortsBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.search, "?view=shorts&short=100");
+  assert.equal(historyState.pointer, 1);
+  assert.ok(container.textContent.includes("Shadow Strike"));
+
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.pointer, 0, "Must return to previous browsing entry (Home)");
+  assert.equal(historyState.search, "");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0);
+
+  await cleanup();
+});
+
+test("V4 FIX 1: Refresh and malformed IDs", async () => {
+  // 1. Non-numeric ID string
+  const dom1 = setupMountedDom("http://localhost:3000/?short=malformed-xyz");
+  await act(async () => {
+    dom1.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+  assert.equal(findElementsByAriaLabel(dom1.container, "Shorts viewer:").length, 0, "Malformed string rejected");
+  await dom1.cleanup();
+
+  // 2. Non-existent numeric ID
+  const dom2 = setupMountedDom("http://localhost:3000/?short=9999");
+  await act(async () => {
+    dom2.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+  assert.equal(findElementsByAriaLabel(dom2.container, "Shorts viewer:").length, 0, "Unknown numeric ID rejected");
+  await dom2.cleanup();
+
+  // 3. Regular video ID (not a Short)
+  const dom3 = setupMountedDom("http://localhost:3000/?short=1");
+  await act(async () => {
+    dom3.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+  assert.equal(findElementsByAriaLabel(dom3.container, "Shorts viewer:").length, 0, "Video ID rejected as Short");
+  await dom3.cleanup();
+});
+
+test("V4 FIX 1: Hashtag exit clears session state and navigates to Explore #tag", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  const card100 = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  await act(async () => {
+    card100.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  const viewerDialog = findElementsByAriaLabel(container, "Shorts viewer:")[0];
+  const tagChip = findElementsByAriaLabel(viewerDialog, "Filter by #valorant")[0];
+
+  await act(async () => {
+    tagChip.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(!historyState.search.includes("short="), "short= parameter must be cleared");
+  assert.ok(historyState.search.includes("view=explore"), "Must navigate to Explore view");
+  assert.equal(historyState.state?.viewerSessionId, undefined, "viewerSessionId must be cleared");
+  assert.equal(historyState.state?.viewerDepth, undefined, "viewerDepth must be cleared");
 
   await cleanup();
 });

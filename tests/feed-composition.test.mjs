@@ -13,13 +13,13 @@ import { edits as productionEdits } from "../src/data/edits.ts";
 function createMockEdit(id, options = {}) {
   return {
     id,
-    title: `Edit ${id}`,
+    title: options.title || `Edit ${id}`,
     category: options.category || "Gaming",
     tags: options.tags || ["gaming", "clip"],
-    description: `Description ${id}`,
-    creator: "Test creator",
-    poster: `/posters/poster-${id}.jpg`,
-    source: `/videos/video-${id}.mp4`,
+    description: options.description || `Description ${id}`,
+    creator: options.creator || "Test creator",
+    poster: options.poster || `/posters/poster-${id}.jpg`,
+    source: options.source || `/videos/video-${id}.mp4`,
     duration: options.duration || "0:15",
     trending: !!options.trending,
     format: options.format,
@@ -254,4 +254,102 @@ test("Feed Composition: splitMixedResults partitions without altering relative r
   const { videos, shorts } = splitMixedResults(mixed);
   assert.deepEqual(videos.map((v) => v.id), [1, 3]);
   assert.deepEqual(shorts.map((s) => s.id), [2, 4]);
+});
+
+// ---------------------------------------------------------------------------
+// 6. Review V4 FIX 2: Catalog Membership & Invariants
+// ---------------------------------------------------------------------------
+
+test("V4 FIX 2: Empty catalog produces no video rows or Shorts shelves even with recommendations", () => {
+  const video7 = createMockEdit(7, { format: "video", title: "Unrelated Rec" });
+  const sections = composeHomeFeed({
+    catalog: [],
+    recommendedVideos: [video7],
+  });
+  assert.equal(sections.length, 0, "Empty catalog must produce no sections whatsoever");
+});
+
+test("V4 FIX 2: Shorts-only catalog produces Shorts sections only and rejects external recommendations", () => {
+  const short100 = createMockEdit(100, { format: "short", title: "Curated Short 100" });
+  const video7 = createMockEdit(7, { format: "video", title: "Unrelated Rec" });
+
+  const sections = composeHomeFeed({
+    catalog: [short100],
+    recommendedVideos: [video7],
+  });
+
+  assert.equal(sections.length, 1, "Only shorts shelf should exist");
+  assert.equal(sections[0].type, "shorts_shelf");
+  assert.equal(sections[0].items.length, 1);
+  assert.equal(sections[0].items[0].id, 100);
+});
+
+test("V4 FIX 2: A recommendation ID matching a Short cannot cause a Short to appear as a landscape video", () => {
+  const short100 = createMockEdit(100, { format: "short", title: "Curated Short 100" });
+  const recItem = createMockEdit(100, { format: "video", title: "Spoofed Rec" });
+
+  const sections = composeHomeFeed({
+    catalog: [short100],
+    recommendedVideos: [recItem],
+  });
+
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].type, "shorts_shelf");
+  assert.equal(sections[0].items[0].format, "short");
+});
+
+test("V4 FIX 2: Recommendations use actual catalog record for displayed metadata and preserve ranking order", () => {
+  const catalogVideo1 = createMockEdit(1, { title: "True Catalog Title 1", duration: "1:00" });
+  const catalogVideo2 = createMockEdit(2, { title: "True Catalog Title 2", duration: "2:00" });
+  const staleRec2 = createMockEdit(2, { title: "Stale Server Title 2", duration: "99:99" });
+  const staleRec1 = createMockEdit(1, { title: "Stale Server Title 1", duration: "99:99" });
+
+  const sections = composeHomeFeed({
+    catalog: [catalogVideo1, catalogVideo2],
+    recommendedVideos: [staleRec2, staleRec1],
+  });
+
+  assert.ok(sections.length >= 1);
+  const recRow = sections[0];
+  assert.equal(recRow.id, "recommended-edits");
+  assert.equal(recRow.items.length, 2);
+  // Preserves recommended order [2, 1]
+  assert.equal(recRow.items[0].id, 2);
+  assert.equal(recRow.items[0].title, "True Catalog Title 2");
+  assert.equal(recRow.items[1].id, 1);
+  assert.equal(recRow.items[1].title, "True Catalog Title 1");
+});
+
+test("V4 FIX 2: Numeric ID 0 is valid and deduplication prevents any duplicate across sections", () => {
+  const video0 = createMockEdit(0, { title: "Zero Origin Video" });
+  const video1 = createMockEdit(1, { title: "Video One" });
+  const short100 = createMockEdit(100, { format: "short" });
+
+  const sections = composeHomeFeed({
+    catalog: [video0, video1, short100],
+    recommendedVideos: [video0],
+    currentEditId: 1, // video 1 is current edit, so must not appear in rows
+  });
+
+  assert.ok(sections.length >= 2);
+  const allItemIds = sections.flatMap((s) => s.items.map((i) => i.id));
+  assert.ok(allItemIds.includes(0), "ID 0 must be included");
+  assert.ok(!allItemIds.includes(1), "Current edit 1 must be excluded");
+  // Zero duplicates across sections
+  assert.equal(new Set(allItemIds).size, allItemIds.length, "No duplicate IDs across sections");
+});
+
+test("V4 FIX 2: Missing-format legacy edits remain regular videos", () => {
+  const legacyEdit = createMockEdit(10, { format: undefined });
+  assert.equal(isVideo(legacyEdit), true);
+  assert.equal(isShort(legacyEdit), false);
+
+  const sections = composeHomeFeed({
+    catalog: [legacyEdit],
+    recommendedVideos: [legacyEdit],
+  });
+
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].type, "video_row");
+  assert.equal(sections[0].items[0].id, 10);
 });

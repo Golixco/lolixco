@@ -79,14 +79,31 @@ export function composeHomeFeed({
   const videoCatalog = catalog.filter((e) => isVideo(e));
   const shortsCatalog = catalog.filter((e) => isShort(e));
 
+  // Build an eligible video catalog lookup map to enforce catalog membership.
+  // This guarantees that:
+  // - Only videos present in the supplied catalog can appear in video rows.
+  // - The actual catalog record is used for displayed metadata.
+  // - A recommendation ID matching a Short in the catalog is strictly rejected from video rows.
+  // - Recommendations not in the supplied catalog are ignored.
+  const eligibleVideoMap = new Map<number, Edit>();
+  for (const item of videoCatalog) {
+    if (typeof item?.id === "number") {
+      eligibleVideoMap.set(item.id, item);
+    }
+  }
+
   // 2. Compose Recommended Edits (Long-form Row 1)
-  // Priority: Recommendation API output
+  // Priority: Recommendation API output validated against eligible catalog videos
   const recommendedRowItems: Edit[] = [];
   for (const item of recommendedVideos) {
     if (recommendedRowItems.length >= mergedConfig.maxRecommendedVideos) break;
-    if (isVideo(item) && !usedVideoIds.has(item.id)) {
-      recommendedRowItems.push(item);
-      usedVideoIds.add(item.id);
+    if (!item || typeof item.id !== "number") continue;
+    if (usedVideoIds.has(item.id)) continue;
+
+    const catalogVideo = eligibleVideoMap.get(item.id);
+    if (catalogVideo) {
+      recommendedRowItems.push(catalogVideo);
+      usedVideoIds.add(catalogVideo.id);
     }
   }
 
