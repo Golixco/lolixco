@@ -1,0 +1,71 @@
+{
+  "$schema": "./manifest.schema.json",
+  "manifestVersion": "1.0.0",
+  "catalogVersion": "catalog-v2",
+  "generatedAt": "2026-10-18T12:00:00Z",
+  "description": "Lolixco owner-curated media intake template. This file contains hypothetical sample records illustrating schema formatting. Real owner media must be reviewed and rights-cleared before publication.",
+  "items": [
+    {
+      "id": 100,
+      "format": "video",
+      "title": "[Hypothetical Sample] Kinetic Motion Study - Void Reversal",
+      "description": "Hypothetical landscape video sample used for testing ingestion pipeline and metadata schema compliance.",
+      "category": "Anime",
+      "fandomIds": ["jujutsu-kaisen"],
+      "tags": ["anime", "sample", "motion", "combat", "domain"],
+      "poster": "/media/posters/sample-video-100.webp",
+      "source": "/media/videos/sample-video-100.mp4",
+      "duration": "0:38",
+      "durationMs": 38000,
+      "trending": false,
+      "media": {
+        "aspectRatio": "16:9",
+        "width": 1920,
+        "height": 1080,
+        "codec": "h264",
+        "audioCodec": "aac",
+        "frameRate": 60,
+        "bitrateKbps": 8500,
+        "loudnessLkfs": -14
+      },
+      "editorial": {
+        "reviewStatus": "draft",
+        "rightsCleared": false,
+        "sourceAttribution": "[Template Example] Hypothetical creator attribution for testing schema.",
+        "curatorNotes": "Hypothetical template record. Real owner media must be reviewed and rights-cleared prior to publication readiness.",
+        "ownerAssetRef": "TEMPLATE_SAMPLE_LANDSCAPE_01"
+      }
+    },
+    {
+      "id": 200,
+      "format": "short",
+      "title": "[Hypothetical Sample] Tactical Blade Dash - Ascent",
+      "description": "Hypothetical portrait short sample used for testing vertical player layout and metadata schema compliance.",
+      "category": "Gaming",
+      "fandomIds": ["valorant"],
+      "tags": ["gaming", "sample", "short", "clutch", "ascent"],
+      "poster": "/media/posters/sample-short-200.webp",
+      "source": "/media/videos/sample-short-200.mp4",
+      "duration": "0:24",
+      "durationMs": 24000,
+      "trending": false,
+      "media": {
+        "aspectRatio": "9:16",
+        "width": 1080,
+        "height": 1920,
+        "codec": "h264",
+        "audioCodec": "aac",
+        "frameRate": 60,
+        "bitrateKbps": 6000,
+        "loudnessLkfs": -14
+      },
+      "editorial": {
+        "reviewStatus": "draft",
+        "rightsCleared": false,
+        "sourceAttribution": "[Template Example] Hypothetical creator attribution for testing schema.",
+        "curatorNotes": "Hypothetical template record. Real owner media must be reviewed and rights-cleared prior to publication readiness.",
+        "ownerAssetRef": "TEMPLATE_SAMPLE_SHORTS_01"
+      }
+    }
+  ]
+}

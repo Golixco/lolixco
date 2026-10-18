@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --import ./tests/register-ts.mjs --test tests/*.test.mjs",
-    "check:assets": "node scripts/check-assets.mjs"
+    "check:assets": "node scripts/check-assets.mjs",
+    "check:content": "node scripts/validate-content.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "^5.1.0",

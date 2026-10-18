@@ -41,7 +41,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python API dependencies
-        run: pip install -r server/recsys/requirements.txt
+        run: pip install -r server/recsys/requirements.txt "jsonschema[format-nongpl]"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -54,6 +54,9 @@ jobs:
 
       - name: Run local media asset checks
         run: pnpm check:assets
+
+      - name: Run content catalog validation
+        run: pnpm check:content
 
       - name: Run production build
         run: pnpm build
