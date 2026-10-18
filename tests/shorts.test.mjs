@@ -94,6 +94,21 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
       const u = new URL(url, historyState.url);
       historyState.historyStack[historyState.pointer] = u.href;
     },
+    back() {
+      this.go(-1);
+    },
+    forward() {
+      this.go(1);
+    },
+    go(delta) {
+      if (typeof delta !== "number" || delta === 0) return;
+      const nextPointer = historyState.pointer + delta;
+      if (nextPointer >= 0 && nextPointer < historyState.historyStack.length) {
+        historyState.pointer = nextPointer;
+        const listeners = globalThis._windowListeners?.get("popstate") || [];
+        listeners.forEach(({ fn }) => fn(new Event("popstate")));
+      }
+    },
   };
 
   const location = {
@@ -182,7 +197,7 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
                 matches.push(child);
               } else if (selector.includes('role="slider"') && role === "slider") {
                 matches.push(child);
-              } else if (tag === "button") {
+              } else if (tag === selector.toLowerCase() || selector === "*") {
                 matches.push(child);
               }
               walk(child);
@@ -1062,5 +1077,536 @@ test("FIX F: Shorts-only catalog never places a Short inside the landscape featu
   // Landscape player must not be assigned a Short edit
   const isSafeForLandscape = (edit) => Boolean(edit && edit.format !== "short");
   assert.equal(isSafeForLandscape(landscapeVideo), false, "Short must never be safe for landscape player");
+});
+
+// ===========================================================================
+// MISSION 6C: FINAL V3 CORRECTNESS TEST SUITES
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 11. REVIEW V3 FIX A: Multi-Short History, Close Rewind & Navigation
+// ---------------------------------------------------------------------------
+
+test("V3 FIX A: Multi-Short history: Home → open Short 100 → Next to Short 101 → Close → Back does NOT reopen Short 100", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  assert.equal(historyState.search, "");
+  assert.equal(historyState.pointer, 0);
+
+  // 1. Open Short 100 from home shelf
+  const short100Card = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  assert.ok(short100Card, "Short 100 card must be visible on shelf");
+
+  await act(async () => {
+    short100Card.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.search, "?short=100");
+  assert.equal(historyState.pointer, 1);
+  assert.ok(container.textContent.includes("Shadow Strike"));
+
+  // 2. Click Next button -> Advances to Short 101
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  assert.ok(nextBtn, "Next button must exist");
+
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.search, "?short=101");
+  assert.equal(historyState.pointer, 2);
+  assert.ok(container.textContent.includes("Domain Expansion"));
+
+  // 3. Explicitly Close the viewer (click close button)
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  assert.ok(closeBtn, "Close button must exist");
+
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // History must rewind back to Home entry (pointer 0)
+  assert.equal(historyState.pointer, 0, "History pointer must return to 0 (Home)");
+  assert.equal(historyState.search, "", "URL must return to clean Home");
+  assert.ok(!container.textContent.includes("Shorts viewer:"), "Viewer must be closed");
+
+  // 4. Click browser Back
+  await act(async () => {
+    globalThis.history.back();
+  });
+
+  // Must NOT reopen Short 100 or 101!
+  assert.equal(historyState.search, "");
+  assert.ok(!container.textContent.includes("Shorts viewer:"), "Browser Back must NOT reopen earlier Short");
+
+  await cleanup();
+});
+
+test("V3 FIX A: Browser Back and Forward while ShortsViewer is open navigates between Shorts", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // Open Short 100
+  const short100Card = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  await act(async () => {
+    short100Card.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=100");
+
+  // Next to Short 101
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+  assert.equal(historyState.search, "?short=101");
+
+  // Browser Back while viewer is open -> returns to Short 100
+  await act(async () => {
+    globalThis.history.back();
+  });
+  assert.equal(historyState.search, "?short=100");
+  assert.ok(container.textContent.includes("Shadow Strike"));
+
+  // Browser Forward while viewer is open -> advances to Short 101
+  await act(async () => {
+    globalThis.history.forward();
+  });
+  assert.equal(historyState.search, "?short=101");
+  assert.ok(container.textContent.includes("Domain Expansion"));
+
+  await cleanup();
+});
+
+test("V3 FIX A: Direct-link entry (?short=101) and Close restores clean browsing URL without crashing or invalid back", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/?short=101");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  assert.equal(historyState.search, "?short=101");
+  assert.ok(container.textContent.includes("Domain Expansion"));
+
+  // Click Close
+  const closeBtn = findElementsByAriaLabel(container, "Close shorts viewer")[0];
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(historyState.search, "", "Direct link close cleans URL");
+  assert.equal(findElementsByAriaLabel(container, "Shorts viewer:").length, 0, "Viewer is closed");
+
+  await cleanup();
+});
+
+test("V3 FIX A: Exiting through hashtag navigation removes short parameter and navigates to Explore #tag", async () => {
+  const { container, root, historyState, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // Open Short 100
+  const short100Card = findElementsByAriaLabel(container, "Watch short: Shadow Strike")[0];
+  await act(async () => {
+    short100Card.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // Find hashtag #valorant inside viewer dialog
+  const viewerDialog = findElementsByAriaLabel(container, "Shorts viewer:")[0];
+  assert.ok(viewerDialog, "Viewer dialog must be mounted");
+  const tagChip = findElementsByAriaLabel(viewerDialog, "Filter by #valorant")[0];
+  assert.ok(tagChip, "Hashtag chip #valorant in viewer must exist");
+
+  await act(async () => {
+    tagChip.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(!historyState.search.includes("short="), "short= parameter must be cleared");
+  assert.ok(historyState.search.includes("q=%23valorant") || historyState.search.includes("q=#valorant"));
+  assert.ok(historyState.search.includes("view=explore"));
+
+  await cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 12. REVIEW V3 FIX B: Filtered Shorts Navigation Scope
+// ---------------------------------------------------------------------------
+
+test("V3 FIX B: Filtered Shorts navigation scope: Gaming → Valorant → open Short → Next only navigates within Valorant shorts", async () => {
+  const gamingShort1 = { id: 201, title: "Valorant Ace", category: "Gaming", fandomIds: ["valorant"], tags: ["valorant"], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
+  const gamingShort2 = { id: 202, title: "Valorant Clutch", category: "Gaming", fandomIds: ["valorant"], tags: ["valorant"], format: "short", poster: "/media/art-1.svg", source: "/media/silent-test-loop.webm" };
+  const animeShort = { id: 203, title: "Anime JJK", category: "Anime", fandomIds: ["jujutsu-kaisen"], tags: ["anime"], format: "short", poster: "/media/art-2.svg", source: "/media/silent-test-loop.webm" };
+
+  const testCatalog = [...edits, gamingShort1, gamingShort2, animeShort];
+
+  const { container, root, cleanup } = setupMountedDom("http://localhost:3000/?view=shorts&category=Gaming&fandom=valorant");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: testCatalog }));
+  });
+
+  // Open Gaming Short 201
+  const card201 = findElementsByAriaLabel(container, "Watch short: Valorant Ace")[0];
+  assert.ok(card201, "Valorant Ace card must exist");
+
+  await act(async () => {
+    card201.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("1 / 2"), "Queue size must be 2 (only the 2 Valorant shorts, not Anime)");
+
+  // Click Next
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("Valorant Clutch"));
+  assert.ok(container.textContent.includes("2 / 2"));
+
+  // Next is now disabled because there are no more Valorant shorts
+  assert.ok(nextBtn.getAttribute("disabled") !== null, "Must NOT navigate into Anime short");
+
+  await cleanup();
+});
+
+test("V3 FIX B: Filtered Shorts navigation scope: Deep link outside active filters prepends requested short without crashing", async () => {
+  const gamingShort = { id: 201, title: "Valorant Ace", category: "Gaming", fandomIds: ["valorant"], tags: ["valorant"], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
+  const animeShort = { id: 203, title: "Anime JJK", category: "Anime", fandomIds: ["jujutsu-kaisen"], tags: ["anime"], format: "short", poster: "/media/art-2.svg", source: "/media/silent-test-loop.webm" };
+
+  const testCatalog = [...edits, gamingShort, animeShort];
+
+  // Deep-link to Anime short 203 while filtered by Gaming
+  const { container, root, cleanup } = setupMountedDom("http://localhost:3000/?view=shorts&category=Gaming&short=203");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: testCatalog }));
+  });
+
+  // Deep linked short 203 is cleanly displayed
+  assert.ok(container.textContent.includes("Anime JJK"));
+
+  await cleanup();
+});
+
+test("V3 FIX B: Filtered Shorts navigation scope: Short ID 0 is accurately preserved in filtered navigation", async () => {
+  const movieShort0 = { id: 0, title: "Zero Origin", category: "Movies", fandomIds: ["spider-man"], tags: ["spiderman"], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
+  const testCatalog = [...edits, movieShort0];
+
+  const { container, root, cleanup } = setupMountedDom("http://localhost:3000/?view=shorts&category=Movies");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: testCatalog }));
+  });
+
+  const card0 = findElementsByAriaLabel(container, "Watch short: Zero Origin")[0];
+  assert.ok(card0, "Short 0 card must exist");
+
+  await act(async () => {
+    card0.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("Zero Origin"));
+  assert.ok(container.textContent.includes("1 / 1"));
+
+  await cleanup();
+});
+
+test("V3 FIX B: Filtered Shorts navigation scope: Search-filtered Shorts restrict viewer queue to query results", async () => {
+  const shortPhonk1 = { id: 301, title: "Phonk Drift", category: "Phonk", fandomIds: [], tags: ["phonk", "drift"], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
+  const shortPhonk2 = { id: 302, title: "Phonk Speed", category: "Phonk", fandomIds: [], tags: ["phonk", "bass"], format: "short", poster: "/media/art-1.svg", source: "/media/silent-test-loop.webm" };
+  const shortAnime = { id: 303, title: "Anime JJK", category: "Anime", fandomIds: ["jujutsu-kaisen"], tags: ["anime"], format: "short", poster: "/media/art-2.svg", source: "/media/silent-test-loop.webm" };
+
+  const testCatalog = [...edits, shortPhonk1, shortPhonk2, shortAnime];
+  const { container, root, cleanup } = setupMountedDom("http://localhost:3000/?q=phonk");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: testCatalog }));
+  });
+
+  const card301 = findElementsByAriaLabel(container, "Watch short: Phonk Drift")[0];
+  assert.ok(card301, "Phonk Drift card must exist");
+
+  await act(async () => {
+    card301.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("Phonk Drift"));
+  assert.ok(container.textContent.includes("1 / 2"), "Queue must only have the 2 phonk search results");
+
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("Phonk Speed"));
+  assert.ok(container.textContent.includes("2 / 2"));
+  assert.ok(nextBtn.getAttribute("disabled") !== null, "Must NOT navigate into Anime short");
+
+  await cleanup();
+});
+
+test("V3 FIX B: Filtered Shorts navigation scope: Opening from unfiltered Home shelf navigates Home shelf items", async () => {
+  const shortA = { id: 401, title: "Home Short A", category: "Gaming", fandomIds: [], tags: ["game"], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
+  const shortB = { id: 402, title: "Home Short B", category: "Anime", fandomIds: [], tags: ["anime"], format: "short", poster: "/media/art-1.svg", source: "/media/silent-test-loop.webm" };
+
+  const testCatalog = [...edits, shortA, shortB];
+  const { container, root, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: testCatalog }));
+  });
+
+  const cardA = findElementsByAriaLabel(container, "Watch short: Home Short A")[0];
+  assert.ok(cardA, "Home Short A card must exist on Home shelf");
+
+  await act(async () => {
+    cardA.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("Home Short A"));
+  assert.ok(container.textContent.includes("1 / 2"));
+
+  const nextBtn = findElementsByAriaLabel(container, "Next short")[0];
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(container.textContent.includes("Home Short B"));
+  assert.ok(container.textContent.includes("2 / 2"));
+
+  await cleanup();
+});
+
+test("V3 FIX B: Filtered Shorts navigation scope: Changes in available Short list while mounted adjusts currentIndex safely", async () => {
+  const short1 = { id: 501, title: "Short One", category: "Phonk", fandomIds: [], tags: [], format: "short", poster: "/media/art-0.svg", source: "/media/silent-test-loop.webm" };
+  const short2 = { id: 502, title: "Short Two", category: "Phonk", fandomIds: [], tags: [], format: "short", poster: "/media/art-1.svg", source: "/media/silent-test-loop.webm" };
+  const short3 = { id: 503, title: "Short Three", category: "Phonk", fandomIds: [], tags: [], format: "short", poster: "/media/art-2.svg", source: "/media/silent-test-loop.webm" };
+
+  const { container, root, cleanup } = setupMountedDom();
+
+  // Mount on short 2 (index 1)
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: [short1, short2, short3],
+        initialShortId: 502,
+        activeShortId: 502,
+      })
+    );
+  });
+
+  assert.ok(container.textContent.includes("Short Two"));
+  assert.ok(container.textContent.includes("2 / 3"));
+
+  // Short list shrinks to [short1, short2]
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: [short1, short2],
+        initialShortId: 502,
+        activeShortId: 502,
+      })
+    );
+  });
+
+  assert.ok(container.textContent.includes("Short Two"));
+  assert.ok(container.textContent.includes("2 / 2"));
+
+  await cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 13. REVIEW V3 FIX C: Background Playback & Late Metadata Prevention
+// ---------------------------------------------------------------------------
+
+test("V3 FIX C: Late metadata race: loadedmetadata event on VideoPlayer while ShortsViewer is open does not start playback", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  // 1. Mount VideoPlayer with isOverlayActive=false
+  await act(async () => {
+    root.render(React.createElement(VideoPlayer, { edit: edits[0], isOverlayActive: false }));
+  });
+
+  function findVideo(node) {
+    if (node.tagName === "VIDEO") return node;
+    if (node.childNodes) {
+      for (const c of node.childNodes) {
+        const found = findVideo(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const video = findVideo(container);
+  assert.ok(video, "Video element must exist");
+  const playCallsBefore = video._playCalls;
+
+  // 2. ShortsViewer opens -> re-render with isOverlayActive=true
+  await act(async () => {
+    root.render(React.createElement(VideoPlayer, { edit: edits[0], isOverlayActive: true }));
+  });
+
+  // 3. Late loadedmetadata fires on VideoPlayer
+  await act(async () => {
+    video.dispatchEvent({ type: "loadedmetadata" });
+  });
+
+  // 4. Verify no playback was started
+  assert.equal(video._playCalls, playCallsBefore, "loadedmetadata must NOT call video.play() while isOverlayActive is true");
+  assert.equal(video.paused, true, "Video must remain paused");
+
+  await cleanup();
+});
+
+test("V3 FIX C: Late playback promise completion when overlay becomes active is paused and cancelled", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  await act(async () => {
+    root.render(React.createElement(VideoPlayer, { edit: edits[0], isOverlayActive: false }));
+  });
+
+  function findVideo(node) {
+    if (node.tagName === "VIDEO") return node;
+    if (node.childNodes) {
+      for (const c of node.childNodes) {
+        const found = findVideo(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const video = findVideo(container);
+  const pauseCallsBefore = video._pauseCalls;
+
+  // Open overlay
+  await act(async () => {
+    root.render(React.createElement(VideoPlayer, { edit: edits[0], isOverlayActive: true }));
+  });
+
+  assert.ok(video._pauseCalls > pauseCallsBefore, "Must pause video when overlay opens");
+
+  // Late play event fired by browser must be cancelled and paused
+  await act(async () => {
+    video.dispatchEvent({ type: "play" });
+  });
+  assert.equal(video.paused, true, "Must force pause if late play event arrives while overlay is active");
+
+  await cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 14. REVIEW V3 FIX D: Up Next Recommendations in Shorts-Only & Variable Catalogs
+// ---------------------------------------------------------------------------
+
+test("V3 FIX D: Up Next recommendations in Shorts-only catalog disables API and avoids fabricated currentEditId", async () => {
+  const { container, root, cleanup } = setupMountedDom("http://localhost:3000/");
+
+  // Mount App with ONLY Shorts
+  await act(async () => {
+    root.render(React.createElement(App, { initialEdits: SYNTHETIC_SHORTS }));
+  });
+
+  // Featured row and Up Next section must be omitted
+  const upNextHeading = container.querySelectorAll("h2").find((h) => h.textContent === "Up Next");
+  assert.equal(upNextHeading, undefined, "Up Next heading must NOT exist when no landscape video exists");
+
+  await cleanup();
+});
+
+test("V3 FIX D: Up Next recommendations across video-only, mixed, and empty catalogs", async () => {
+  // Empty catalog
+  const { container: emptyContainer, root: emptyRoot, cleanup: emptyCleanup } = setupMountedDom("http://localhost:3000/");
+  await act(async () => {
+    emptyRoot.render(React.createElement(App, { initialEdits: [] }));
+  });
+  assert.equal(emptyContainer.querySelectorAll("h2").find((h) => h.textContent === "Up Next"), undefined, "Empty catalog omits Up Next cleanly");
+  await emptyCleanup();
+
+  // Video-only catalog (production edits)
+  const { container: prodContainer, root: prodRoot, cleanup: prodCleanup } = setupMountedDom("http://localhost:3000/");
+  await act(async () => {
+    prodRoot.render(React.createElement(App, { initialEdits: edits }));
+  });
+  assert.ok(prodContainer.querySelectorAll("h2").find((h) => h.textContent === "Up Next"), "Video catalog renders Up Next");
+  await prodCleanup();
+
+  // Mixed catalog
+  const { container: mixedContainer, root: mixedRoot, cleanup: mixedCleanup } = setupMountedDom("http://localhost:3000/");
+  await act(async () => {
+    mixedRoot.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+  assert.ok(mixedContainer.querySelectorAll("h2").find((h) => h.textContent === "Up Next"), "Mixed catalog renders Up Next");
+  await mixedCleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 15. REVIEW V3 FIX E: Recoverable Media Playback Verification
+// ---------------------------------------------------------------------------
+
+test("V3 FIX E: Recoverable media test: video playback recovers successfully after error retry", async () => {
+  const { container, root, cleanup } = setupMountedDom();
+
+  await act(async () => {
+    root.render(
+      React.createElement(ShortsViewer, {
+        shorts: SYNTHETIC_SHORTS,
+        initialShortId: 100,
+        onClose: () => {},
+      })
+    );
+  });
+
+  function findVideo(node) {
+    if (node.tagName === "VIDEO") return node;
+    if (node.childNodes) {
+      for (const c of node.childNodes) {
+        const found = findVideo(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const video = findVideo(container);
+
+  // Trigger error event
+  await act(async () => {
+    video.dispatchEvent({ type: "error" });
+  });
+
+  assert.ok(container.textContent.includes("Video unavailable"));
+
+  // Click Retry button
+  const retryBtn = container.querySelectorAll("button").find(
+    (b) => b.textContent && b.textContent.includes("Retry")
+  );
+  assert.ok(retryBtn, "Retry button must be visible in error state");
+
+  const loadCallsBefore = video._loadCalls;
+  await act(async () => {
+    retryBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.ok(video._loadCalls > loadCallsBefore, "Retry must invoke video.load()");
+
+  // Simulate recoverable media playback success
+  await act(async () => {
+    video.dispatchEvent({ type: "playing" });
+  });
+
+  assert.ok(!container.textContent.includes("Video unavailable"), "Error overlay must clear on recovery");
+
+  await cleanup();
 });
 

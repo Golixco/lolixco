@@ -79,6 +79,20 @@ function TestHarness() {
   const [logs, setLogs] = useState<string[]>([]);
   const [shelfItems, setShelfItems] = useState<Edit[]>(TEST_FIXTURE_SHORTS);
 
+  const [corruptedRecovered, setCorruptedRecovered] = useState(false);
+
+  const fixtureShorts: Edit[] = TEST_FIXTURE_SHORTS.map((s) => {
+    if (s.id === 102) {
+      return {
+        ...s,
+        source: corruptedRecovered
+          ? "/media/motion-study.webm"
+          : "/test-error-assets/missing-video.webm",
+      };
+    }
+    return s;
+  });
+
   const addLog = useCallback((msg: string) => {
     setLogs((prev) => [`[${new Date().toISOString().slice(11, 19)}] ${msg}`, ...prev.slice(0, 19)]);
   }, []);
@@ -139,7 +153,7 @@ function TestHarness() {
     return () => window.removeEventListener("popstate", onPop);
   }, [addLog]);
 
-  const activeShort = TEST_FIXTURE_SHORTS.find((s) => s.id === activeShortId) || null;
+  const activeShort = fixtureShorts.find((s) => s.id === activeShortId) || null;
 
   return (
     <div style={{ padding: "32px", maxWidth: "1200px", margin: "0 auto", color: "#f8fafc" }}>
@@ -150,6 +164,9 @@ function TestHarness() {
         <p style={{ color: "#94a3b8", fontSize: "14px" }}>
           Strictly development-isolated environment with synthetic Shorts fixture.
         </p>
+        <div style={{ marginTop: "12px", padding: "12px 16px", borderRadius: "6px", background: "rgba(56, 189, 248, 0.1)", border: "1px solid rgba(56, 189, 248, 0.25)", fontSize: "13px", color: "#e0f2fe", lineHeight: "1.5" }}>
+          <strong>Evidence Note:</strong> Layout tests verify the portrait viewer container (fixed 9:16 aspect ratio, responsive bounds, and controls). The synthetic test fixture renders repository-local test footage (<code>/media/motion-study.webm</code>) cropped via CSS <code>object-fit: cover</code>. Genuine 9:16 vertical encoding verification will occur when production vertical assets are ingested.
+        </div>
       </header>
 
       <section style={{ display: "flex", gap: "12px", marginBottom: "24px", flexWrap: "wrap" }}>
@@ -158,7 +175,7 @@ function TestHarness() {
           type="button"
           className="primary"
           style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer" }}
-          onClick={() => handleSelectShort(TEST_FIXTURE_SHORTS[0])}
+          onClick={() => handleSelectShort(fixtureShorts[0])}
         >
           Open Short #100 (Shadow Strike)
         </button>
@@ -167,7 +184,7 @@ function TestHarness() {
           type="button"
           className="primary"
           style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer" }}
-          onClick={() => handleSelectShort(TEST_FIXTURE_SHORTS[2])}
+          onClick={() => handleSelectShort(fixtureShorts[2])}
         >
           Open Short #0 (Numeric ID 0)
         </button>
@@ -175,16 +192,28 @@ function TestHarness() {
           id="btn-open-error"
           type="button"
           style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer", background: "#ef4444", color: "#fff", border: "none" }}
-          onClick={() => handleSelectShort(TEST_FIXTURE_SHORTS[3])}
+          onClick={() => handleSelectShort(fixtureShorts[3])}
         >
           Open Corrupted Short (Test Error & Retry)
+        </button>
+        <button
+          id="btn-recover-error"
+          type="button"
+          style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer", background: corruptedRecovered ? "#10b981" : "#d97706", color: "#fff", border: "none" }}
+          onClick={() => {
+            const next = !corruptedRecovered;
+            setCorruptedRecovered(next);
+            addLog(`Toggled media availability for Short #102: now ${next ? "VALID (/media/motion-study.webm)" : "CORRUPTED (missing-video.webm)"}`);
+          }}
+        >
+          {corruptedRecovered ? "Restore Error Media (Corrupt #102)" : "Simulate Media Recovery for #102"}
         </button>
         <button
           id="btn-toggle-shelf"
           type="button"
           style={{ padding: "8px 16px", borderRadius: "6px", cursor: "pointer", background: "#334155", color: "#fff", border: "1px solid #475569" }}
           onClick={() => {
-            const next = shelfItems.length === 0 ? TEST_FIXTURE_SHORTS : [];
+            const next = shelfItems.length === 0 ? fixtureShorts : [];
             setShelfItems(next);
             addLog(`Toggled shelf items: now ${next.length} items (Testing hook ordering)`);
           }}
@@ -227,7 +256,7 @@ function TestHarness() {
       {/* Active Viewer Overlay */}
       {activeShort && (
         <ShortsViewer
-          shorts={TEST_FIXTURE_SHORTS}
+          shorts={fixtureShorts}
           initialShortId={activeShort.id}
           activeShortId={activeShort.id}
           onShortChange={handleShortChange}

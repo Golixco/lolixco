@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import Header from "./components/layout/Header";
 import Sidebar from "./components/layout/Sidebar";
 import Dialog from "./components/ui/Dialog";
@@ -151,22 +151,29 @@ export function syncUrl(
   }
 }
 
-export default function App() {
+export default function App({
+  initialEdits = edits,
+}: {
+  initialEdits?: Edit[];
+} = {}) {
   const [expanded, setExpanded] = useState(() => innerWidth >= 1440);
   const [mobile, setMobile] = useState(() => innerWidth < 768);
   const [drawer, setDrawer] = useState(false);
 
   // Curated Shorts in the catalog
-  const catalogShorts = useMemo(() => edits.filter((e) => isShort(e)), []);
+  const catalogShorts = useMemo(
+    () => initialEdits.filter((e) => isShort(e)),
+    [initialEdits]
+  );
 
   // Guarantee that Shorts-only catalogs never place a Short into the landscape player
   const initialLandscapeVideo = useMemo(
-    () => edits.find((e) => isVideo(e)) || null,
-    []
+    () => initialEdits.find((e) => isVideo(e)) || null,
+    [initialEdits]
   );
 
   // Initialize navigation state from URL query parameters
-  const initialParams = parseUrlParams(edits);
+  const initialParams = parseUrlParams(initialEdits);
   const [query, setQuery] = useState(initialParams.query);
   const [category, setCategory] = useState(initialParams.category);
   const [fandom, setFandom] = useState(initialParams.fandom);
@@ -175,12 +182,19 @@ export default function App() {
   const [activeShort, setActiveShort] = useState<Edit | null>(() => {
     if (typeof initialParams.shortId === "number") {
       return (
-        edits.find((e) => e.id === initialParams.shortId && isShort(e)) || null
+        initialEdits.find(
+          (e) => e.id === initialParams.shortId && isShort(e)
+        ) || null
       );
     }
     return null;
   });
   const [modal, setModal] = useState("");
+
+  // Tracks whether the current ShortsViewer session was initiated via in-app selection
+  const viewerOpenedInAppRef = useRef<boolean>(false);
+  // Tracks the number of history entries pushed during the active viewer session
+  const viewerDepthRef = useRef<number>(0);
 
   useEffect(() => {
     const mq = matchMedia("(max-width:767px)");
@@ -194,7 +208,7 @@ export default function App() {
 
   // Normalize initial URL if it contains direct fandom without category or invalid short IDs
   useEffect(() => {
-    const current = parseUrlParams(edits);
+    const current = parseUrlParams(initialEdits);
     syncUrl(
       current.category,
       current.fandom,
@@ -203,7 +217,7 @@ export default function App() {
       current.shortId,
       false
     );
-  }, []);
+  }, [initialEdits]);
 
   // Synchronize browser history navigation (Back / Forward)
   useEffect(() => {
@@ -214,23 +228,29 @@ export default function App() {
         query: q,
         view: v,
         shortId: sId,
-      } = parseUrlParams(edits);
+      } = parseUrlParams(initialEdits);
       setCategory(c);
       setFandom(f);
       setQuery(q);
       setActive(v);
       if (typeof sId === "number") {
         const matchingShort =
-          edits.find((e) => e.id === sId && isShort(e)) || null;
+          initialEdits.find((e) => e.id === sId && isShort(e)) || null;
         setActiveShort(matchingShort);
+        // If popstate transitioned between shorts while viewer was open, decrement depth
+        if (viewerDepthRef.current > 1) {
+          viewerDepthRef.current -= 1;
+        }
       } else {
         setActiveShort(null);
+        viewerDepthRef.current = 0;
+        viewerOpenedInAppRef.current = false;
       }
     }
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [initialEdits]);
 
   const handleCategoryChange = useCallback(
     (newCat: string) => {
@@ -301,8 +321,10 @@ export default function App() {
   // Atomic hashtag navigation from within Shorts viewer
   const handleShortsViewerTagClick = useCallback(
     (tag: string) => {
-      // 1. Close the viewer
+      // 1. Close the viewer and reset session tracking
       setActiveShort(null);
+      viewerDepthRef.current = 0;
+      viewerOpenedInAppRef.current = false;
       // 2. Prepare exact hashtag query: #tag
       const tagQuery = "#" + tag.toLowerCase().trim();
       setQuery(tagQuery);
@@ -331,6 +353,8 @@ export default function App() {
 
   const handleSelectShort = useCallback(
     (short: Edit) => {
+      viewerOpenedInAppRef.current = true;
+      viewerDepthRef.current = 1;
       setActiveShort(short);
       syncUrl(category, fandom, query, active, short.id, true);
     },
@@ -340,6 +364,7 @@ export default function App() {
   // Synchronize Next / Previous inside ShortsViewer with URL and activeShort
   const handleShortChange = useCallback(
     (newShort: Edit) => {
+      viewerDepthRef.current += 1;
       setActiveShort(newShort);
       syncUrl(category, fandom, query, active, newShort.id, true);
     },
@@ -353,8 +378,24 @@ export default function App() {
     if (active === "Shorts" && catalogShorts.length === 0) {
       setActive("Home");
     }
-    // Use replaceState (usePush: false) on close so Back does not reopen viewer
-    syncUrl(category, fandom, query, nextView, null, false);
+
+    if (viewerOpenedInAppRef.current && viewerDepthRef.current > 0) {
+      const depth = viewerDepthRef.current;
+      viewerDepthRef.current = 0;
+      viewerOpenedInAppRef.current = false;
+      if (
+        typeof window !== "undefined" &&
+        typeof window.history?.go === "function"
+      ) {
+        window.history.go(-depth);
+      } else {
+        syncUrl(category, fandom, query, nextView, null, false);
+      }
+    } else {
+      viewerDepthRef.current = 0;
+      viewerOpenedInAppRef.current = false;
+      syncUrl(category, fandom, query, nextView, null, false);
+    }
   }, [active, category, catalogShorts.length, fandom, query]);
 
   function choose(edit: Edit) {
@@ -403,17 +444,22 @@ export default function App() {
   }
 
   const { edits: filtered, loading } = useDiscoveryFeed(
-    edits,
+    initialEdits,
     query,
     category,
     fandom
   );
 
-  const { edits: upNextEdits } = useRecommendations({
-    surface: "up_next",
-    currentEditId: selected?.id ?? edits[0]?.id ?? 0,
-    limit: 4,
-  });
+  const isUpNextEnabled = selected !== null && isVideo(selected);
+
+  const { edits: upNextEdits } = useRecommendations(
+    {
+      surface: "up_next",
+      currentEditId: selected ? selected.id : undefined,
+      limit: 4,
+    },
+    isUpNextEnabled
+  );
 
   const { edits: homeRecommendedEdits } = useRecommendations({
     surface: "home",
@@ -424,10 +470,10 @@ export default function App() {
     () =>
       composeHomeFeed({
         recommendedVideos: homeRecommendedEdits,
-        catalog: edits,
-        currentEditId: selected?.id ?? edits[0]?.id ?? 0,
+        catalog: initialEdits,
+        currentEditId: selected?.id ?? null,
       }),
-    [homeRecommendedEdits, selected?.id]
+    [homeRecommendedEdits, initialEdits, selected?.id]
   );
 
   const { videos: searchVideos, shorts: searchShorts } = useMemo(
@@ -440,6 +486,34 @@ export default function App() {
     (category !== "All" && category !== "Featured") ||
     !!fandom ||
     active === "Explore";
+
+  const homeShelfShorts = useMemo(() => {
+    const shelf = homeSections.find((s) => s.type === "shorts_shelf");
+    return shelf ? shelf.items : [];
+  }, [homeSections]);
+
+  // Compute eligible Shorts queue reflecting current view, category, fandom, and search filters
+  const eligibleShorts = useMemo(() => {
+    let baseQueue: Edit[];
+    if (active === "Shorts" || browsing || active === "Explore") {
+      baseQueue = searchShorts;
+    } else {
+      baseQueue =
+        homeShelfShorts.length > 0 ? homeShelfShorts : catalogShorts;
+    }
+
+    if (activeShort && !baseQueue.some((s) => s.id === activeShort.id)) {
+      return [activeShort, ...baseQueue];
+    }
+    return baseQueue.length > 0 ? baseQueue : activeShort ? [activeShort] : [];
+  }, [
+    active,
+    activeShort,
+    browsing,
+    catalogShorts,
+    homeShelfShorts,
+    searchShorts,
+  ]);
 
   const messages: Record<string, string> = {
     Immersion:
@@ -718,11 +792,7 @@ export default function App() {
       )}
       {activeShort && (
         <ShortsViewer
-          shorts={
-            catalogShorts.some((s) => s.id === activeShort.id)
-              ? catalogShorts
-              : [activeShort, ...catalogShorts]
-          }
+          shorts={eligibleShorts}
           initialShortId={activeShort.id}
           activeShortId={activeShort.id}
           onShortChange={handleShortChange}

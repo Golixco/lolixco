@@ -72,9 +72,9 @@ export function ShortsViewer({
   }, []);
 
   const prevActiveShortId = useRef(activeShortId);
-  const prevInitialShortId = useRef(initialShortId);
+  const prevShortsRef = useRef(shorts);
 
-  // Update currentIndex only when activeShortId or initialShortId prop actually changes from parent
+  // Synchronize currentIndex when activeShortId prop changes OR when shorts list changes
   useEffect(() => {
     if (
       typeof activeShortId === "number" &&
@@ -85,18 +85,22 @@ export function ShortsViewer({
       if (idx !== -1) {
         setCurrentIndex(idx);
       }
-    } else if (
-      activeShortId === undefined &&
-      typeof initialShortId === "number" &&
-      initialShortId !== prevInitialShortId.current
-    ) {
-      prevInitialShortId.current = initialShortId;
-      const idx = shorts.findIndex((s) => s.id === initialShortId);
-      if (idx !== -1) {
-        setCurrentIndex(idx);
+    } else if (prevShortsRef.current !== shorts) {
+      prevShortsRef.current = shorts;
+      const currentId =
+        typeof activeShortId === "number"
+          ? activeShortId
+          : currentShort?.id ?? initialShortId;
+      if (typeof currentId === "number") {
+        const idx = shorts.findIndex((s) => s.id === currentId);
+        if (idx !== -1) {
+          setCurrentIndex(idx);
+        } else if (currentIndex >= shorts.length && shorts.length > 0) {
+          setCurrentIndex(shorts.length - 1);
+        }
       }
     }
-  }, [activeShortId, initialShortId, shorts]);
+  }, [activeShortId, currentIndex, currentShort?.id, initialShortId, shorts]);
 
   // Video playback lifecycle when currentIndex changes
   useEffect(() => {
