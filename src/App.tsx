@@ -218,8 +218,32 @@ export default function App({
   });
   const [modal, setModal] = useState("");
 
-  // Active viewer session identifier and monotonic session counter
-  const viewerSessionIdRef = useRef<string | null>(null);
+  // Active viewer session identifier and monotonic session counter.
+  // Restore existing application-owned viewer session on refresh if URL has a valid Short
+  // and history.state has a recognized session identifier and positive safe integer depth.
+  const initialViewerSessionId = (() => {
+    if (typeof window === "undefined") return null;
+    if (typeof initialParams.shortId !== "number") return null;
+    const isInitialShortValid = initialEdits.some(
+      (e) => e.id === initialParams.shortId && isShort(e)
+    );
+    if (!isInitialShortValid) return null;
+
+    const navState = window.history?.state;
+    if (
+      navState &&
+      typeof navState.viewerSessionId === "string" &&
+      navState.viewerSessionId.trim() &&
+      typeof navState.viewerDepth === "number" &&
+      Number.isSafeInteger(navState.viewerDepth) &&
+      navState.viewerDepth > 0
+    ) {
+      return navState.viewerSessionId;
+    }
+    return null;
+  })();
+
+  const viewerSessionIdRef = useRef<string | null>(initialViewerSessionId);
   const sessionCounterRef = useRef<number>(0);
 
   useEffect(() => {

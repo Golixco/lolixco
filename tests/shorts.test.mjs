@@ -384,18 +384,43 @@ function setupMountedDom(initialUrl = "http://localhost:3000/") {
     }
   };
 
-  const container = mockDoc.createElement("div");
-  mockDoc.body = container;
-  container.parentNode = mockDoc;
-  const root = createRoot(container);
+  let currentContainer = mockDoc.createElement("div");
+  mockDoc.body = currentContainer;
+  currentContainer.parentNode = mockDoc;
+  let currentRoot = createRoot(currentContainer);
+
+  const remount = async () => {
+    await act(async () => {
+      currentRoot.unmount();
+    });
+    globalThis._windowListeners = new Map();
+    const nextContainer = mockDoc.createElement("div");
+    mockDoc.body = nextContainer;
+    nextContainer.parentNode = mockDoc;
+    currentContainer = nextContainer;
+    currentRoot = createRoot(nextContainer);
+    return { container: currentContainer, root: currentRoot };
+  };
 
   const cleanup = async () => {
     await act(async () => {
-      root.unmount();
+      currentRoot.unmount();
     });
   };
 
-  return { mockDoc, container, root, historyState, triggerPop, cleanup };
+  return {
+    mockDoc,
+    get container() {
+      return currentContainer;
+    },
+    get root() {
+      return currentRoot;
+    },
+    historyState,
+    triggerPop,
+    remount,
+    cleanup,
+  };
 }
 
 function findButtonsByText(node, text) {
@@ -1951,5 +1976,79 @@ test("V4 FIX 1: Hashtag exit clears session state and navigates to Explore #tag"
   assert.equal(historyState.state?.viewerDepth, undefined, "viewerDepth must be cleared");
 
   await cleanup();
+});
+
+test("V4 REFRESH: Home → Short 100 → Next 101 → refresh/remount preserving browser history → Close → Back", async () => {
+  const dom = setupMountedDom("http://localhost:3000/");
+
+  await act(async () => {
+    dom.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  assert.equal(dom.historyState.search, "");
+  assert.equal(dom.historyState.pointer, 0);
+
+  // 1. Open Short 100
+  const card100 = findElementsByAriaLabel(dom.container, "Watch short: Shadow Strike")[0];
+  assert.ok(card100, "Short 100 card must be visible on shelf");
+  await act(async () => {
+    card100.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(dom.historyState.search, "?short=100");
+  assert.equal(dom.historyState.pointer, 1);
+  const session1 = dom.historyState.state?.viewerSessionId;
+  assert.ok(session1, "Viewer session identifier must be tagged");
+  assert.equal(dom.historyState.state?.viewerDepth, 1);
+
+  // 2. Next to Short 101
+  const nextBtn = findElementsByAriaLabel(dom.container, "Next short")[0];
+  assert.ok(nextBtn, "Next button must exist");
+  await act(async () => {
+    nextBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  assert.equal(dom.historyState.search, "?short=101");
+  assert.equal(dom.historyState.pointer, 2);
+  assert.equal(dom.historyState.state?.viewerSessionId, session1);
+  assert.equal(dom.historyState.state?.viewerDepth, 2);
+
+  // 3. Page Refresh / Remount: preserve URL, historyStack, stateStack, pointer
+  await dom.remount();
+
+  // Mount a fresh App instance into the remounted container
+  await act(async () => {
+    dom.root.render(React.createElement(App, { initialEdits: [...edits, ...SYNTHETIC_SHORTS] }));
+  });
+
+  // Verify that newly mounted App recognizes the existing viewer session without pushing new entries
+  assert.equal(dom.historyState.search, "?short=101");
+  assert.equal(dom.historyState.pointer, 2);
+  assert.equal(dom.historyState.state?.viewerSessionId, session1);
+  assert.equal(dom.historyState.state?.viewerDepth, 2);
+  assert.ok(dom.container.textContent.includes("Domain Expansion"));
+
+  // 4. Close the viewer
+  const closeBtn = findElementsByAriaLabel(dom.container, "Close shorts viewer")[0];
+  assert.ok(closeBtn, "Close button must exist after refresh");
+  await act(async () => {
+    closeBtn.dispatchEvent({ type: "click", bubbles: true });
+  });
+
+  // History must rewind back to Home entry (pointer 0)
+  assert.equal(dom.historyState.pointer, 0, "History pointer must return to 0 (Home)");
+  assert.equal(dom.historyState.search, "", "URL must return to clean Home");
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 0, "Viewer must be closed");
+
+  // 5. Browser Back
+  await act(async () => {
+    globalThis.history.back();
+  });
+
+  // Must NOT reopen Short 100 or 101!
+  assert.equal(dom.historyState.search, "");
+  assert.equal(findElementsByAriaLabel(dom.container, "Shorts viewer:").length, 0, "Browser Back must NOT reopen earlier Short");
+
+  await dom.cleanup();
 });
 
