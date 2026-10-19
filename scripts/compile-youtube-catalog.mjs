@@ -341,9 +341,52 @@ export async function compileYouTubeCatalog(options = {}) {
     }
   }
 
+  // Build historical allocation registry from every historical assigned ID in audit (FIX B)
+  const historicalIdToVideoMap = new Map();
+  const historicalVideoToIdMap = new Map();
+  const reservedHistoricalIds = new Set();
+
+  for (const item of items) {
+    const videoId = item.canonicalVideoId;
+    const assignedId = item.assignedLolixcoId;
+    if (typeof assignedId === "number") {
+      // Detect historical duplicate ownership and fail closed (FIX B requirement 5)
+      if (historicalIdToVideoMap.has(assignedId)) {
+        const existingVideoId = historicalIdToVideoMap.get(assignedId);
+        if (existingVideoId !== videoId) {
+          errors.push(
+            `Historical duplicate Lolixco ID collision detected: assigned Lolixco ID ${assignedId} was assigned to both '${existingVideoId}' and '${videoId}'. Catalog compilation aborted to prevent corrupted ID ownership.`
+          );
+        }
+      } else {
+        historicalIdToVideoMap.set(assignedId, videoId);
+      }
+      historicalVideoToIdMap.set(videoId, assignedId);
+      reservedHistoricalIds.add(assignedId);
+    }
+  }
+
+  // Also reserve IDs from base catalog (e.g. demo edits 0-16 and any existing edits)
+  for (const edit of currentBaseCatalog) {
+    if (typeof edit.id === "number") {
+      reservedHistoricalIds.add(edit.id);
+    }
+  }
+
+  // Fail closed immediately if historical duplicate IDs exist in audit data
+  if (errors.length > 0) {
+    return {
+      success: false,
+      errors,
+      warnings,
+      compiledCount: 0,
+      compiledEdits: currentBaseCatalog,
+      dryRun,
+    };
+  }
+
   // 3. Fail-Closed Item Validation before compilation (FIX B, FIX D, FIX E)
   const newEdits = [];
-  const allocatedItems = [];
   const seenLolixcoIds = new Set(currentBaseCatalog.slice(0, 17).map((e) => e.id));
   const seenYouTubeVideoIds = new Set();
 
@@ -459,9 +502,13 @@ export async function compileYouTubeCatalog(options = {}) {
       }
     }
 
-    // G. Explicit confirmed format
+    // G. Explicit confirmed format (FIX C)
     if (item.format !== "video" && item.format !== "short") {
       errors.push(`Item '${videoId}': unconfirmed format '${item.format}'. Format must be explicitly confirmed as 'video' or 'short'.`);
+    } else if (item.format === "short" && item.formatConfirmed === false) {
+      errors.push(
+        `Item '${videoId}': candidate portrait short has formatConfirmed: false. Explicit editorial format confirmation is required before publication.`
+      );
     }
 
     // H. Canonical category & registered fandom check
@@ -477,24 +524,41 @@ export async function compileYouTubeCatalog(options = {}) {
       }
     }
 
-    // I. Allocate stable ID and verify ranges
-    if (!item.assignedLolixcoId) {
-      item.assignedLolixcoId = allocateStableId(item, [
-        ...currentBaseCatalog.map((e) => ({ assignedLolixcoId: e.id, format: e.format })),
-        ...allocatedItems,
-      ]);
+    // I. Allocate stable ID and verify ranges (FIX B)
+    // 1. Allow an existing video to reclaim its original stable ID after becoming available again (FIX B requirement 4)
+    if (historicalVideoToIdMap.has(videoId)) {
+      item.assignedLolixcoId = historicalVideoToIdMap.get(videoId);
     }
-    allocatedItems.push(item);
+
+    // 2. Prevent taking an ID previously owned by another video (FIX B requirements 1-3)
+    if (!item.assignedLolixcoId) {
+      item.assignedLolixcoId = allocateStableId(item, Array.from(reservedHistoricalIds));
+      reservedHistoricalIds.add(item.assignedLolixcoId);
+      historicalIdToVideoMap.set(item.assignedLolixcoId, videoId);
+      historicalVideoToIdMap.set(videoId, item.assignedLolixcoId);
+    } else {
+      // Verify that this video actually owns this assignedLolixcoId
+      const ownerVideoId = historicalIdToVideoMap.get(item.assignedLolixcoId);
+      if (ownerVideoId && ownerVideoId !== videoId) {
+        errors.push(
+          `ID conflict for item '${videoId}': assigned Lolixco ID ${item.assignedLolixcoId} is already owned by video '${ownerVideoId}'. One video cannot take an ID previously owned by another.`
+        );
+      }
+    }
     projected.id = item.assignedLolixcoId;
 
-    // Check ID range
+    // Check ID range and reject format changes conflicting with stable ID ranges (FIX C requirement 7)
     if (projected.format === "short") {
       if (projected.id < 200 || projected.id > 299) {
-        errors.push(`Short '${videoId}': assigned ID ${projected.id} outside allowed range [200..299].`);
+        errors.push(
+          `Short '${videoId}': assigned ID ${projected.id} outside allowed range [200..299]. Format changes conflicting with stable ID ranges are prohibited.`
+        );
       }
     } else {
       if (projected.id < 100 || projected.id > 199) {
-        errors.push(`Landscape video '${videoId}': assigned ID ${projected.id} outside allowed range [100..199].`);
+        errors.push(
+          `Landscape video '${videoId}': assigned ID ${projected.id} outside allowed range [100..199]. Format changes conflicting with stable ID ranges are prohibited.`
+        );
       }
     }
 
@@ -525,7 +589,7 @@ export async function compileYouTubeCatalog(options = {}) {
 
   const finalEdits = [...currentBaseCatalog.slice(0, 17), ...newEdits];
 
-  // 4. Write to output if not dryRun (FIX F: atomic writes with transactional rollback)
+  // 4. Write to output if not dryRun (FIX F: atomic writes with transactional rollback & backup visibility)
   let writtenTo = null;
   if (!dryRun) {
     const catalogBackupPath = existsSync(outputPath) ? `${outputPath}.tmp.bak.${process.pid}.${Date.now()}` : null;
@@ -537,7 +601,21 @@ export async function compileYouTubeCatalog(options = {}) {
     if (auditBackupPath) {
       copyFileSync(auditFilePath, auditBackupPath);
     }
-    createAuditBackup(auditFilePath);
+
+    try {
+      createAuditBackup(auditFilePath);
+    } catch (backupErr) {
+      if (catalogBackupPath && existsSync(catalogBackupPath)) unlinkSync(catalogBackupPath);
+      if (auditBackupPath && existsSync(auditBackupPath)) unlinkSync(auditBackupPath);
+      return {
+        success: false,
+        errors: [`Audit backup failure prior to compilation: ${backupErr.message}`],
+        warnings,
+        compiledCount: 0,
+        compiledEdits: currentBaseCatalog,
+        dryRun,
+      };
+    }
 
     try {
       const code = generateYouTubeEditsTs(finalEdits);

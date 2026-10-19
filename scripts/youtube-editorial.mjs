@@ -212,7 +212,7 @@ export function allocateStableId(item, existingItems = []) {
   const format = item.format || "video";
   const usedIds = new Set(
     existingItems
-      .map((i) => i.assignedLolixcoId)
+      .map((i) => (typeof i === "number" ? i : (i?.assignedLolixcoId ?? i?.id)))
       .filter((id) => typeof id === "number")
   );
 

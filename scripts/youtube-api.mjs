@@ -167,6 +167,7 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   const {
     apiKey = process.env.YOUTUBE_API_KEY,
     mockMode = false,
+    customMockMetadata = null,
     timeoutMs = 10000,
     maxRetries = 2,
   } = options;
@@ -184,8 +185,10 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   // Limit to 50 items per request
   const batch = uniqueIds.slice(0, 50);
 
+  const isMock = mockMode || Boolean(customMockMetadata);
+
   // FAIL CLOSED: Require a real API key for normal ingestion
-  if (!mockMode && (!apiKey || typeof apiKey !== "string" || !apiKey.trim())) {
+  if (!isMock && (!apiKey || typeof apiKey !== "string" || !apiKey.trim())) {
     return {
       items: [],
       missingIds: batch,
@@ -196,21 +199,45 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   }
 
   // MOCK MODE (For automated tests only via explicit switch or injected mock database)
-  if (mockMode) {
+  if (isMock) {
     const items = [];
     const missingIds = [];
+    const incompleteIds = [];
+    const confirmedUnavailableIds = [];
+    const retryableIds = [];
+    const errors = [];
 
     for (const id of batch) {
-      if (MOCK_YOUTUBE_DATABASE.has(id)) {
-        const mock = MOCK_YOUTUBE_DATABASE.get(id);
+      let mock = undefined;
+      if (customMockMetadata && id in customMockMetadata) {
+        mock = customMockMetadata[id];
+      } else if (MOCK_YOUTUBE_DATABASE.has(id)) {
+        mock = MOCK_YOUTUBE_DATABASE.get(id);
+      }
+
+      if (mock !== undefined) {
         if (mock === null) {
           // Explicitly simulated 404/deleted
           missingIds.push(id);
+          confirmedUnavailableIds.push(id);
+        } else if (mock && mock.quotaExceeded === true) {
+          missingIds.push(id);
+          retryableIds.push(id);
+          errors.push(`Video '${id}': YouTube API quota exceeded (retryable).`);
+        } else if (mock && mock.incomplete === true) {
+          missingIds.push(id);
+          incompleteIds.push(id);
+          errors.push(`Video '${id}': incomplete YouTube API response - missing required metadata fields.`);
+        } else if (mock && mock.retryable === true) {
+          missingIds.push(id);
+          retryableIds.push(id);
+          errors.push(`Video '${id}': transient YouTube API failure (retryable).`);
         } else {
           items.push({
+            canonicalVideoId: id,
+            provenance: mock.provenance || "youtube_data_api_v3",
+            isMock: mock.isMock ?? false,
             ...mock,
-            isMock: true,
-            provenance: "synthetic_mock",
           });
         }
       } else {
@@ -238,7 +265,7 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
       }
     }
 
-    return { items, missingIds, errors: [] };
+    return { items, missingIds, incompleteIds, confirmedUnavailableIds, retryableIds, errors };
   }
 
   // REAL API CALL (When YOUTUBE_API_KEY is available)
@@ -275,6 +302,11 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
           return {
             items: [],
             missingIds: batch,
+            incompleteIds: batch,
+            confirmedUnavailableIds: [],
+            retryableIds: batch,
+            isQuotaExceeded: true,
+            retryable: true,
             errors: ["YouTube Data API quota exceeded (quotaExceeded). Please wait or use cached metadata."],
           };
         }
@@ -288,6 +320,10 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
         return {
           items: [],
           missingIds: batch,
+          incompleteIds: batch,
+          confirmedUnavailableIds: [],
+          retryableIds: batch,
+          retryable: true,
           errors: [`YouTube Data API error HTTP ${response.status}: ${masked}`],
         };
       }
@@ -357,6 +393,8 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
         items: mappedItems,
         missingIds: allMissingIds,
         incompleteIds,
+        confirmedUnavailableIds: notFoundIds,
+        retryableIds: [],
         errors: itemErrors,
       };
     } catch (err) {
@@ -372,6 +410,10 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   return {
     items: [],
     missingIds: batch,
+    incompleteIds: batch,
+    confirmedUnavailableIds: [],
+    retryableIds: batch,
+    retryable: true,
     errors: [`Failed to query YouTube API after ${attempt} attempts: ${errorMsg}`],
   };
 }

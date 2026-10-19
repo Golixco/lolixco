@@ -98,6 +98,103 @@ export async function inspectReviewItem(videoId, auditFilePath = CANONICAL_AUDIT
 }
 
 /**
+ * Explicitly confirms the content format ("video" or "short") for a candidate item.
+ * Required for portrait Shorts prior to approval (FIX C).
+ */
+export async function confirmItemFormat(videoId, format, options = {}) {
+  const {
+    auditFilePath = CANONICAL_AUDIT_PATH,
+    notes = "Format explicitly confirmed by owner review",
+    reviewer = "owner",
+    dryRun = false,
+  } = options;
+
+  if (!existsSync(auditFilePath)) {
+    return { success: false, errors: [`Audit file not found at: ${auditFilePath}`] };
+  }
+
+  let auditData;
+  try {
+    auditData = JSON.parse(readFileSync(auditFilePath, "utf-8"));
+  } catch (err) {
+    return { success: false, errors: [`Failed to parse audit JSON: ${err.message}`] };
+  }
+
+  const validation = validateAuditDocument(auditData, auditFilePath);
+  if (!validation.valid) {
+    return { success: false, errors: validation.errors };
+  }
+
+  const item = auditData.items.find((i) => i.canonicalVideoId === videoId);
+  if (!item) {
+    return { success: false, errors: [`Video ID '${videoId}' not found in audit log.`] };
+  }
+
+  if (format !== "video" && format !== "short") {
+    return {
+      success: false,
+      errors: [`Invalid format '${format}'. Format must be either 'video' or 'short'.`],
+    };
+  }
+
+  // Reject unsupported format changes that conflict with existing stable ID ranges (FIX C requirement 7)
+  if (typeof item.assignedLolixcoId === "number") {
+    if (format === "short" && (item.assignedLolixcoId < 200 || item.assignedLolixcoId > 299)) {
+      return {
+        success: false,
+        errors: [
+          `Format conflict for video '${videoId}': Cannot change format to 'short'. Existing assigned Lolixco ID ${item.assignedLolixcoId} is in the landscape range [100..199]. Format changes conflicting with stable ID ranges are prohibited.`,
+        ],
+      };
+    }
+    if (format === "video" && (item.assignedLolixcoId < 100 || item.assignedLolixcoId > 199)) {
+      return {
+        success: false,
+        errors: [
+          `Format conflict for video '${videoId}': Cannot change format to 'video'. Existing assigned Lolixco ID ${item.assignedLolixcoId} is in the shorts range [200..299]. Format changes conflicting with stable ID ranges are prohibited.`,
+        ],
+      };
+    }
+  }
+
+  const previousFormat = item.format;
+  item.format = format;
+  item.confirmedFormat = format;
+  item.formatConfirmed = true;
+
+  if (!Array.isArray(item.auditHistory)) {
+    item.auditHistory = [];
+  }
+
+  item.auditHistory.push({
+    date: new Date().toISOString(),
+    event: "format_confirmation",
+    previousFormat,
+    confirmedFormat: format,
+    confirmedBy: reviewer,
+    notes,
+  });
+
+  if (!dryRun) {
+    try {
+      createAuditBackup(auditFilePath);
+    } catch (err) {
+      return { success: false, errors: [`Audit backup failure: ${err.message}`] };
+    }
+    auditData.lastUpdated = new Date().toISOString();
+    safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
+  }
+
+  return {
+    success: true,
+    videoId,
+    confirmedFormat: format,
+    formatConfirmed: true,
+    item,
+  };
+}
+
+/**
  * Approves an individual video for catalog publication with fail-closed safety checks.
  */
 export async function approveReviewItem(videoId, options = {}) {
@@ -180,10 +277,47 @@ export async function approveReviewItem(videoId, options = {}) {
     }
   }
 
-  // 6. Confirmed Content Format ("video" or "short")
-  const confirmedFormat = format || item.format;
-  if (confirmedFormat !== "video" && confirmedFormat !== "short") {
-    errors.push(`Video '${videoId}' has unconfirmed format '${confirmedFormat}'. Format must be explicitly confirmed as 'video' or 'short'.`);
+  // 6. Confirmed Content Format ("video" or "short") (FIX C)
+  let targetFormat = format;
+  const isCandidateShort =
+    targetFormat === "short" ||
+    (!targetFormat && (item.confirmedFormat === "short" || item.format === "short" || item.inferredFormat === "short"));
+
+  if (isCandidateShort) {
+    // For portrait Shorts, require recorded manual confirmation before approval!
+    // A /shorts/ URL or <= 180s duration alone does not prove portrait dimensions.
+    const isManuallyConfirmed =
+      targetFormat === "short" ||
+      (item.formatConfirmed === true && item.confirmedFormat === "short") ||
+      options.confirmShort === true;
+
+    if (!isManuallyConfirmed) {
+      errors.push(
+        `Video '${videoId}': Candidate portrait Short requires recorded manual format confirmation before approval. A /shorts/ URL or <=180s duration does not prove portrait dimensions. Confirm format via --confirm-format or pass format: 'short'.`
+      );
+    } else {
+      targetFormat = "short";
+    }
+  } else {
+    // Candidate landscape video
+    targetFormat = targetFormat || item.confirmedFormat || item.format || "video";
+    if (targetFormat !== "video") {
+      errors.push(`Video '${videoId}' has invalid format '${targetFormat}'. Must be 'video' or 'short'.`);
+    }
+  }
+
+  // Reject unsupported format changes that conflict with existing stable ID ranges (FIX C requirement 7)
+  if (typeof item.assignedLolixcoId === "number") {
+    if (targetFormat === "short" && (item.assignedLolixcoId < 200 || item.assignedLolixcoId > 299)) {
+      errors.push(
+        `Format conflict for video '${videoId}': Cannot approve as 'short'. Existing assigned Lolixco ID ${item.assignedLolixcoId} is in the landscape range [100..199]. Format changes conflicting with stable ID ranges are prohibited.`
+      );
+    }
+    if (targetFormat === "video" && (item.assignedLolixcoId < 100 || item.assignedLolixcoId > 199)) {
+      errors.push(
+        `Format conflict for video '${videoId}': Cannot approve as 'video'. Existing assigned Lolixco ID ${item.assignedLolixcoId} is in the shorts range [200..299]. Format changes conflicting with stable ID ranges are prohibited.`
+      );
+    }
   }
 
   if (errors.length > 0) {
@@ -193,7 +327,9 @@ export async function approveReviewItem(videoId, options = {}) {
   // Transition status and record audit history
   const previousStatus = item.contentReviewStatus;
   item.contentReviewStatus = "approved";
-  item.format = confirmedFormat;
+  item.format = targetFormat;
+  item.confirmedFormat = targetFormat;
+  item.formatConfirmed = true;
 
   if (!Array.isArray(item.auditHistory)) {
     item.auditHistory = [];
@@ -204,12 +340,17 @@ export async function approveReviewItem(videoId, options = {}) {
     event: "owner_approval",
     from: previousStatus,
     to: "approved",
-    confirmedFormat,
+    confirmedFormat: targetFormat,
+    formatConfirmed: true,
     notes,
   });
 
   if (!dryRun) {
-    createAuditBackup(auditFilePath);
+    try {
+      createAuditBackup(auditFilePath);
+    } catch (err) {
+      return { success: false, errors: [`Audit backup failure: ${err.message}`] };
+    }
     auditData.lastUpdated = new Date().toISOString();
     safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
   }
@@ -219,7 +360,7 @@ export async function approveReviewItem(videoId, options = {}) {
     videoId,
     previousStatus,
     newStatus: "approved",
-    confirmedFormat,
+    confirmedFormat: targetFormat,
     item,
   };
 }
@@ -265,7 +406,11 @@ export async function rejectReviewItem(videoId, options = {}) {
   });
 
   if (!dryRun) {
-    createAuditBackup(auditFilePath);
+    try {
+      createAuditBackup(auditFilePath);
+    } catch (err) {
+      return { success: false, errors: [`Audit backup failure: ${err.message}`] };
+    }
     auditData.lastUpdated = new Date().toISOString();
     safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
   }
@@ -336,7 +481,12 @@ export async function approveBatch(batchId, options = {}) {
   }
 
   if (!dryRun) {
-    createAuditBackup(auditFilePath);
+    try {
+      createAuditBackup(auditFilePath);
+    } catch (err) {
+      return { success: false, errors: [`Audit backup failure: ${err.message}`] };
+    }
+    auditData.lastUpdated = new Date().toISOString();
     safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
   }
 
@@ -369,6 +519,9 @@ export async function runReviewCli(args = process.argv.slice(2)) {
       command = "list";
     } else if ((arg === "--show" || arg === "--inspect") && args[i + 1]) {
       command = "show";
+      targetId = args[++i];
+    } else if (arg === "--confirm-format" && args[i + 1]) {
+      command = "confirm-format";
       targetId = args[++i];
     } else if (arg === "--approve" && args[i + 1]) {
       command = "approve";
@@ -403,6 +556,7 @@ Usage:
 Commands:
   --list, --pending               List all imported items pending owner review
   --show <videoId>                Display full metadata and classification for a video
+  --confirm-format <videoId>      Confirm format (video or short) before approval (required for Shorts)
   --approve <videoId>             Approve an item for catalog publication
   --reject <videoId>              Reject an item with recorded reason
   --approve-batch <batchId>       Approve all eligible items in an imported batch
@@ -497,6 +651,21 @@ Batch 01 Review Example:
         console.log(`  [${h.date}] ${h.event}: ${JSON.stringify(h)}`);
       }
     }
+    return 0;
+  }
+
+  if (command === "confirm-format") {
+    if (!format) {
+      console.error(`❌ --format <video|short> is required for --confirm-format.`);
+      return 1;
+    }
+    console.log(`Confirming format for video ID '${targetId}' as '${format}'...`);
+    const res = await confirmItemFormat(targetId, format, { notes, auditFilePath });
+    if (!res.success) {
+      console.error(`❌ Format confirmation failed:\n  - ${res.errors.join("\n  - ")}`);
+      return 1;
+    }
+    console.log(`✅ Format confirmed: Video '${targetId}' successfully confirmed as '${res.confirmedFormat}'.`);
     return 0;
   }
 

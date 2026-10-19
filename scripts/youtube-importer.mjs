@@ -134,20 +134,21 @@ export function createAuditBackup(auditFilePath) {
 
   const baseDir = dirname(auditFilePath);
   const backupDir = resolve(baseDir, "backups");
-  if (!existsSync(backupDir)) {
-    mkdirSync(backupDir, { recursive: true });
-  }
-
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const baseName = basename(auditFilePath, ".json");
   const backupPath = resolve(backupDir, `${baseName}.${timestamp}.bak.json`);
 
   try {
+    if (!existsSync(backupDir)) {
+      mkdirSync(backupDir, { recursive: true });
+    }
     const content = readFileSync(auditFilePath, "utf-8");
     safeAtomicWriteFileSync(backupPath, content);
     return backupPath;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(
+      `Failed to create audit backup at '${backupPath}': ${err.message}. Aborting mutation to prevent unprotected data loss.`
+    );
   }
 }
 
@@ -213,6 +214,8 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
       category: defaultCategory,
       fandom: defaultFandom,
       fandomIds: defaultFandom ? [defaultFandom] : [],
+      hasExplicitCategory: Boolean(defaultCategory && defaultCategory.trim()),
+      hasExplicitFandom: Boolean(defaultFandom && defaultFandom.trim()),
     }));
   } else if (Array.isArray(input)) {
     items = input.map((item) => {
@@ -222,8 +225,22 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
           category: defaultCategory,
           fandom: defaultFandom,
           fandomIds: defaultFandom ? [defaultFandom] : [],
+          hasExplicitCategory: Boolean(defaultCategory && defaultCategory.trim()),
+          hasExplicitFandom: Boolean(defaultFandom && defaultFandom.trim()),
         };
       }
+      const hasCat = Boolean(
+        (item.category && item.category.trim()) ||
+        (item.ownerCategory && item.ownerCategory.trim()) ||
+        (defaultCategory && defaultCategory.trim())
+      );
+      const hasFan = Boolean(
+        (item.fandom && item.fandom.trim()) ||
+        (item.ownerFandom && item.ownerFandom.trim()) ||
+        (Array.isArray(item.fandomIds) && item.fandomIds.length > 0) ||
+        (Array.isArray(item.ownerFandomIds) && item.ownerFandomIds.length > 0) ||
+        (defaultFandom && defaultFandom.trim())
+      );
       return {
         url: item.url,
         category: item.category || item.ownerCategory || defaultCategory,
@@ -233,9 +250,19 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
           : Array.isArray(item.ownerFandomIds)
             ? item.ownerFandomIds
             : (item.fandom ? [item.fandom] : (item.ownerFandom ? [item.ownerFandom] : (defaultFandom ? [defaultFandom] : []))),
+        hasExplicitCategory: hasCat,
+        hasExplicitFandom: hasFan,
       };
     });
   } else if (typeof input === "object" && input !== null) {
+    const hasBatchCat = Boolean(
+      (input.category && input.category.trim()) || (defaultCategory && defaultCategory.trim())
+    );
+    const hasBatchFan = Boolean(
+      (input.fandom && input.fandom.trim()) ||
+      (Array.isArray(input.fandomIds) && input.fandomIds.length > 0) ||
+      (defaultFandom && defaultFandom.trim())
+    );
     const batchCat = input.category || defaultCategory;
     const batchFan = input.fandom || defaultFandom;
     const batchFandomIds = Array.isArray(input.fandomIds)
@@ -248,16 +275,33 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
         category: batchCat,
         fandom: batchFan,
         fandomIds: batchFandomIds,
+        hasExplicitCategory: hasBatchCat,
+        hasExplicitFandom: hasBatchFan,
       }));
     } else if (Array.isArray(input.items)) {
-      items = input.items.map((item) => ({
-        url: item.url,
-        category: item.category || batchCat,
-        fandom: item.fandom || batchFan,
-        fandomIds: Array.isArray(item.fandomIds)
-          ? item.fandomIds
-          : (item.fandom ? [item.fandom] : batchFandomIds),
-      }));
+      items = input.items.map((item) => {
+        const itemHasCat = Boolean(
+          (item.category && item.category.trim()) ||
+          (item.ownerCategory && item.ownerCategory.trim()) ||
+          hasBatchCat
+        );
+        const itemHasFan = Boolean(
+          (item.fandom && item.fandom.trim()) ||
+          (item.ownerFandom && item.ownerFandom.trim()) ||
+          (Array.isArray(item.fandomIds) && item.fandomIds.length > 0) ||
+          hasBatchFan
+        );
+        return {
+          url: item.url,
+          category: item.category || item.ownerCategory || batchCat,
+          fandom: item.fandom || item.ownerFandom || batchFan,
+          fandomIds: Array.isArray(item.fandomIds)
+            ? item.fandomIds
+            : (item.fandom ? [item.fandom] : batchFandomIds),
+          hasExplicitCategory: itemHasCat,
+          hasExplicitFandom: itemHasFan,
+        };
+      });
     }
   }
 
@@ -277,10 +321,10 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     ? { ...maybeOptions, batchInput: inputOrOptions }
     : inputOrOptions;
 
+  const batchId = options.batchId || options["batch-id"] || `batch-${Date.now()}`;
+  const batchFile = options.batchFile || options["batch-file"] || options.batchPath || options["batch-path"];
   const {
-    batchId = `batch-${Date.now()}`,
     batchInput,
-    batchPath,
     category = "",
     fandom = "",
     auditFilePath = CANONICAL_AUDIT_PATH,
@@ -291,12 +335,12 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
   const errors = [];
   const warnings = [];
 
-  // 1. Load batch items
+  // 1. Load batch items (supports batchFile, batchPath, raw text, JSON, array, or file path)
   let rawItems = [];
-  if (batchInput) {
-    rawItems = parseBatchInput(batchInput, category, fandom);
-  } else if (batchPath) {
-    const resolvedPath = resolve(batchPath);
+  const resolvedFilePath = batchFile || (typeof batchInput === "string" && existsSync(batchInput) ? batchInput : null);
+
+  if (resolvedFilePath) {
+    const resolvedPath = resolve(resolvedFilePath);
     if (!existsSync(resolvedPath)) {
       return {
         success: false,
@@ -307,6 +351,8 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     }
     const content = readFileSync(resolvedPath, "utf-8");
     rawItems = parseBatchInput(content, category, fandom);
+  } else if (batchInput) {
+    rawItems = parseBatchInput(batchInput, category, fandom);
   }
 
   // 2. Strict Limit: At most 10 URLs per batch
@@ -394,6 +440,8 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
       category: raw.category || raw.ownerCategory || category,
       fandom: raw.fandom || raw.ownerFandom || fandom,
       fandomIds: raw.fandomIds || (raw.fandom ? [raw.fandom] : (raw.ownerFandom ? [raw.ownerFandom] : (fandom ? [fandom] : []))),
+      hasExplicitCategory: raw.hasExplicitCategory ?? Boolean((raw.category || raw.ownerCategory || category || "").trim()),
+      hasExplicitFandom: raw.hasExplicitFandom ?? Boolean((raw.fandom || raw.ownerFandom || fandom || "").trim() || (Array.isArray(raw.fandomIds) && raw.fandomIds.length > 0)),
     });
 
     validVideoIdsToFetch.push(norm.videoId);
@@ -415,6 +463,9 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
   } else if (typeof options.metadataFetcher === "function") {
     const fetchedItems = [];
     const missing = [];
+    const incomplete = [];
+    const confirmedUnavailable = [];
+    const retryable = [];
     const fetchErrors = [];
     for (const vid of validVideoIdsToFetch) {
       const res = await options.metadataFetcher(vid);
@@ -422,33 +473,68 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
         fetchedItems.push(res.data || res.metadata);
       } else {
         missing.push(vid);
+        if (res?.confirmedUnavailable || res?.notFound || res?.status === 404 || res?.deleted) {
+          confirmedUnavailable.push(vid);
+        } else if (res?.incomplete) {
+          incomplete.push(vid);
+        } else if (res?.retryable) {
+          retryable.push(vid);
+        }
         if (res?.errors) fetchErrors.push(...res.errors);
+        else if (res?.error) fetchErrors.push(res.error);
       }
     }
-    metadataResult = { items: fetchedItems, missingIds: missing, errors: fetchErrors };
+    metadataResult = {
+      items: fetchedItems,
+      missingIds: missing,
+      incompleteIds: incomplete,
+      confirmedUnavailableIds: confirmedUnavailable,
+      retryableIds: retryable,
+      errors: fetchErrors,
+    };
   } else if (options.apiClient?.fetchMetadata) {
     const fetchedItems = [];
     const missing = [];
+    const incomplete = [];
+    const confirmedUnavailable = [];
+    const retryable = [];
     const fetchErrors = [];
     for (const vid of validVideoIdsToFetch) {
       const res = await options.apiClient.fetchMetadata(vid);
-      if (res && res.success && res.metadata) {
-        fetchedItems.push(res.metadata);
+      if (res && res.success && (res.data || res.metadata)) {
+        fetchedItems.push(res.data || res.metadata);
       } else {
         missing.push(vid);
+        if (res?.confirmedUnavailable || res?.notFound || res?.status === 404 || res?.deleted) {
+          confirmedUnavailable.push(vid);
+        } else if (res?.incomplete) {
+          incomplete.push(vid);
+        } else if (res?.retryable) {
+          retryable.push(vid);
+        }
         if (res?.errors) fetchErrors.push(...res.errors);
+        else if (res?.error) fetchErrors.push(res.error);
       }
     }
-    metadataResult = { items: fetchedItems, missingIds: missing, errors: fetchErrors };
+    metadataResult = {
+      items: fetchedItems,
+      missingIds: missing,
+      incompleteIds: incomplete,
+      confirmedUnavailableIds: confirmedUnavailable,
+      retryableIds: retryable,
+      errors: fetchErrors,
+    };
   } else {
     metadataResult = await fetchYouTubeVideoMetadata(validVideoIdsToFetch, {
-      mockMode,
+      mockMode: mockMode || options.useMock || Boolean(options.customMockMetadata),
+      customMockMetadata: options.customMockMetadata,
     });
   }
 
   if (metadataResult.errors.length > 0) {
-    if (metadataResult.items.length === 0) {
-      // Entire batch failed (e.g. missing API key, network failure, quota exceeded)
+    const hasExistingItemsToPreserve = normalizedBatch.some((e) => existingByVideoId.has(e.canonicalVideoId));
+    if (metadataResult.items.length === 0 && !hasExistingItemsToPreserve) {
+      // Entire batch failed (e.g. missing API key, network failure, quota exceeded) on new items
       return {
         success: false,
         errors: metadataResult.errors,
@@ -459,8 +545,10 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     warnings.push(...metadataResult.errors);
   }
 
-  const metadataMap = new Map(metadataResult.items.map((item) => [item.canonicalVideoId, item]));
-  const missingIdSet = new Set(metadataResult.missingIds);
+  const metadataMap = new Map((metadataResult.items || []).map((item) => [item.canonicalVideoId, item]));
+  const missingIdSet = new Set(metadataResult.missingIds || []);
+  const confirmedUnavailableSet = new Set(metadataResult.confirmedUnavailableIds || []);
+  const incompleteIdSet = new Set(metadataResult.incompleteIds || []);
 
   // 6. Editorial Classification and Record Assembly
   const processedRecords = [];
@@ -470,32 +558,53 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     const metadata = metadataMap.get(videoId);
     const existing = existingByVideoId.get(videoId);
 
+    const hasExplicitCategory = Boolean(entry.hasExplicitCategory);
+    const hasExplicitFandom = Boolean(entry.hasExplicitFandom);
+
+    // FIX D: If category or fandom was omitted in refresh, preserve existing!
+    const effectiveCategory = hasExplicitCategory
+      ? entry.category
+      : (existing?.category || existing?.ownerCategory || "");
+
+    const effectiveFandom = hasExplicitFandom
+      ? entry.fandom
+      : (existing?.fandom || existing?.ownerFandom || "");
+
+    const effectiveFandomIds = hasExplicitFandom
+      ? (entry.fandomIds && entry.fandomIds.length > 0 ? entry.fandomIds : (entry.fandom ? [entry.fandom] : []))
+      : (existing?.fandomIds || existing?.ownerFandomIds || []);
+
+    const effectiveFormat = (entry.urlFormatHint && !existing?.format)
+      ? entry.urlFormatHint
+      : (existing?.format || entry.urlFormatHint || "video");
+
     let classification;
     if (metadata) {
       classification = evaluateEditorialClassification({
-        ownerCategory: entry.category,
-        ownerFandom: entry.fandom,
-        ownerFandomIds: entry.fandomIds,
+        ownerCategory: effectiveCategory,
+        ownerFandom: effectiveFandom,
+        ownerFandomIds: effectiveFandomIds,
         metadata,
         registeredFandoms,
-        urlFormatHint: entry.urlFormatHint,
+        urlFormatHint: effectiveFormat,
       });
     } else {
       classification = {
-        category: entry.category,
-        fandomIds: [],
-        format: entry.urlFormatHint || "unknown",
+        category: effectiveCategory,
+        fandomIds: effectiveFandomIds,
+        format: effectiveFormat,
         conflictFlag: false,
-        warnings: missingIdSet.has(videoId)
+        warnings: confirmedUnavailableSet.has(videoId)
           ? [`Video ID '${videoId}' not found or private on YouTube`]
-          : ["Metadata could not be retrieved"],
+          : [`Metadata lookup for '${videoId}' was incomplete or inconclusive; preserving existing record`],
         reviewStatus: "unavailable",
       };
     }
 
-    // Preserve editorial review decision across re-imports (FIX C)
+    // Preserve editorial review decision across re-imports (FIX C / FIX A / FIX D)
     let finalReviewStatus = classification.reviewStatus;
     const auditHistory = Array.isArray(existing?.auditHistory) ? [...existing.auditHistory] : [];
+    let isInconclusiveRefresh = false;
 
     if (existing) {
       const isPreviouslyReviewed =
@@ -504,16 +613,35 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
 
       if (isPreviouslyReviewed) {
         const targetStatus = existing.contentReviewStatus; // "approved" or "published"
-        if (!metadata || missingIdSet.has(videoId)) {
-          finalReviewStatus = "unavailable";
-          classification.warnings.push(`Previously ${targetStatus} item is now unavailable or removed on YouTube.`);
-          auditHistory.push({
-            date: new Date().toISOString(),
-            event: "status_transition",
-            from: targetStatus,
-            to: "unavailable",
-            reason: "video_unavailable_or_removed",
-          });
+        if (!metadata) {
+          // FIX A: Distinguish confirmed absence from incomplete or transient failure
+          if (confirmedUnavailableSet.has(videoId)) {
+            finalReviewStatus = "unavailable";
+            classification.warnings.push(`Previously ${targetStatus} item is now confirmed unavailable or removed on YouTube.`);
+            auditHistory.push({
+              date: new Date().toISOString(),
+              event: "status_transition",
+              from: targetStatus,
+              to: "unavailable",
+              reason: "video_unavailable_or_removed",
+            });
+          } else {
+            // INCONCLUSIVE REFRESH (incomplete response, transient error, quota, timeout)
+            // Preserve the existing published/approved record and last verified metadata!
+            finalReviewStatus = targetStatus;
+            isInconclusiveRefresh = true;
+            classification.warnings.push(
+              `Verification warning: Inconclusive metadata refresh for '${videoId}'. Preserving last verified metadata; retry scheduled.`
+            );
+            auditHistory.push({
+              date: new Date().toISOString(),
+              event: "verification_warning",
+              status: targetStatus,
+              reason: "inconclusive_metadata_refresh",
+              warning: "Inconclusive metadata response; preserving existing verified metadata and scheduling retry.",
+              retryRequired: true,
+            });
+          }
         } else if (metadata.embeddable === false) {
           finalReviewStatus = "embed_restricted";
           classification.warnings.push(`Previously ${targetStatus} item embedding has been restricted.`);
@@ -536,21 +664,17 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
           });
         } else {
           const prevCat = existing.category || existing.ownerCategory || "";
-          const newCat = classification.category || entry.category || "";
           const prevFandoms = (existing.fandomIds || existing.ownerFandomIds || []).slice().sort().join(",");
-          const newFandoms = (classification.fandomIds || entry.fandomIds || []).slice().sort().join(",");
           const prevFormat = existing.format || "video";
-          const newFormat = classification.format || "video";
 
-          const isClassificationChanged =
-            (Boolean(prevCat) && Boolean(newCat) && prevCat !== newCat) ||
-            prevFandoms !== newFandoms ||
-            prevFormat !== newFormat;
+          const isExplicitCategoryChange = hasExplicitCategory && entry.category && entry.category !== prevCat;
+          const newFandoms = (entry.fandomIds || (entry.fandom ? [entry.fandom] : [])).slice().sort().join(",");
+          const isExplicitFandomChange = hasExplicitFandom && newFandoms !== prevFandoms;
 
-          if (isClassificationChanged) {
+          if (isExplicitCategoryChange || isExplicitFandomChange) {
             finalReviewStatus = "needs_recheck";
             classification.warnings.push(
-              `Editorial classification changed on re-import (category: '${prevCat}' -> '${newCat}', fandoms: '${prevFandoms}' -> '${newFandoms}', format: '${prevFormat}' -> '${newFormat}'). Transitioned to 'needs_recheck'. Requires explicit owner review.`
+              `Editorial classification changed on re-import (category: '${prevCat}' -> '${classification.category}', fandoms: '${prevFandoms}' -> '${classification.fandomIds.join(",")}'). Transitioned to 'needs_recheck'. Requires explicit owner review.`
             );
             auditHistory.push({
               date: new Date().toISOString(),
@@ -564,9 +688,9 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
                 format: prevFormat,
               },
               newClassification: {
-                category: newCat,
-                fandomIds: classification.fandomIds || entry.fandomIds || [],
-                format: newFormat,
+                category: classification.category,
+                fandomIds: classification.fandomIds,
+                format: classification.format,
               },
             });
           } else if (
@@ -613,22 +737,30 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
       submittedUrl: entry.submittedUrl,
       canonicalVideoId: videoId,
       canonicalUrl: entry.canonicalUrl,
-      ownerCategory: entry.category,
-      ownerFandom: entry.fandom,
-      ownerFandomIds: entry.fandomIds,
-      category: classification.category || entry.category,
-      fandomIds: classification.fandomIds,
+      ownerCategory: effectiveCategory,
+      ownerFandom: effectiveFandom,
+      ownerFandomIds: effectiveFandomIds,
+      category: classification.category || effectiveCategory,
+      fandomIds: classification.fandomIds?.length > 0 ? classification.fandomIds : effectiveFandomIds,
       suggestedCategories: classification.suggestedCategories || [],
       suggestedFandomIds: classification.suggestedFandomIds || [],
       conflictFlag: classification.conflictFlag,
-      format: classification.format,
-      metadataFetchStatus: metadata ? "fetched" : "failed",
+      format: existing?.format || classification.format,
+      inferredFormat: classification.format,
+      formatConfirmed: existing?.formatConfirmed === true,
+      confirmedFormat: existing?.formatConfirmed ? (existing.confirmedFormat || existing.format) : null,
+      metadataFetchStatus: isInconclusiveRefresh
+        ? (existing?.metadataFetchStatus || "fetched")
+        : (metadata ? "fetched" : "failed"),
       contentReviewStatus: finalReviewStatus,
       validationWarnings: classification.warnings,
-      lastMetadataVerification: new Date().toISOString(),
-      metadata: metadata || null,
-      isMock: metadata?.isMock === true,
-      provenance: metadata?.provenance || "unfetched",
+      retryRequired: isInconclusiveRefresh || Boolean(existing?.retryRequired),
+      lastMetadataVerification: isInconclusiveRefresh
+        ? (existing?.lastMetadataVerification || null)
+        : new Date().toISOString(),
+      metadata: isInconclusiveRefresh ? (existing?.metadata || null) : (metadata || null),
+      isMock: isInconclusiveRefresh ? (existing?.isMock === true) : (metadata?.isMock === true),
+      provenance: isInconclusiveRefresh ? (existing?.provenance || "unfetched") : (metadata?.provenance || "unfetched"),
       assignedLolixcoId: finalAssignedId,
       auditHistory,
     };
@@ -641,7 +773,16 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
 
   // 7. Save Audit Trail (unless dryRun)
   if (!dryRun) {
-    createAuditBackup(auditFilePath);
+    try {
+      createAuditBackup(auditFilePath);
+    } catch (err) {
+      return {
+        success: false,
+        errors: [`Audit backup failure: ${err.message}`],
+        warnings,
+        processed: [],
+      };
+    }
     auditData.items = Array.from(existingByVideoId.values());
     auditData.lastUpdated = new Date().toISOString();
     safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
@@ -685,24 +826,24 @@ Usage:
   node scripts/youtube-importer.mjs [options]
 
 Options:
-  --batch <id>          Batch identifier (e.g. 01, batch-01)
-  --category <name>     Category (Anime, Gaming, Movies, Series, Phonk, Multifandom)
-  --fandom <slug>       Fandom slug (e.g. valorant, jujutsu-kaisen)
-  --input <file>        Input file (.txt with 1 URL per line or .json)
-  --urls <u1,u2>        Comma-separated list of YouTube URLs
-  --dry-run             Simulate import without writing to audit file
-  --mock                Enable offline mock mode for testing
-  --audit-file <path>   Audit file path (default: content/audit/youtube-intake-audit.json)
-  -h, --help            Show this help message
+  --batch, --batch-id <id>     Batch identifier (e.g. 01, batch-01, batch-10)
+  --category <name>            Category (Anime, Gaming, Movies, Series, Phonk, Multifandom)
+  --fandom <slug>              Fandom slug (e.g. valorant, jujutsu-kaisen)
+  --input, --batch-file <file> Input file (.txt with 1 URL per line or .json)
+  --urls <u1,u2>               Comma-separated list of YouTube URLs
+  --dry-run                    Simulate import without writing to audit file
+  --mock                       Enable offline mock mode for testing
+  --audit-file <path>          Audit file path (default: content/audit/youtube-intake-audit.json)
+  -h, --help                   Show this help message
 `);
       return 0;
-    } else if (arg === "--batch" && args[i + 1]) {
+    } else if ((arg === "--batch" || arg === "--batch-id") && args[i + 1]) {
       options.batchId = args[++i];
     } else if (arg === "--category" && args[i + 1]) {
       options.category = args[++i];
     } else if (arg === "--fandom" && args[i + 1]) {
       options.fandom = args[++i];
-    } else if (arg === "--input" && args[i + 1]) {
+    } else if ((arg === "--input" || arg === "--batch-file") && args[i + 1]) {
       options.batchPath = args[++i];
     } else if (arg === "--urls" && args[i + 1]) {
       options.urls = args[++i].split(",").map((u) => u.trim()).filter(Boolean);
