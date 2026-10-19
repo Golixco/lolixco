@@ -61,6 +61,7 @@ export interface YouTubePlayerProps {
   muted?: boolean;
   controls?: boolean;
   coordinatorId?: string;
+  registerWithCoordinator?: boolean;
   onEnded?: () => void;
   onPlay?: () => void;
   onPause?: () => void;
@@ -116,6 +117,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       muted = true,
       controls = true,
       coordinatorId,
+      registerWithCoordinator = true,
       onEnded,
       onPlay,
       onPause,
@@ -237,6 +239,10 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
 
     // Register with playbackCoordinator for single-active-player audio exclusivity
     useEffect(() => {
+      if (registerWithCoordinator === false) {
+        return;
+      }
+
       const unregister = playbackCoordinator.registerPlayer(
         effectiveCoordinatorId,
         () => {
@@ -253,7 +259,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       return () => {
         unregister();
       };
-    }, [effectiveCoordinatorId]);
+    }, [effectiveCoordinatorId, registerWithCoordinator]);
 
     // Stable Player initialization: ONLY dependent on [videoId, containerId, effectiveCoordinatorId]
     // Changing playback props (autoPlay, pause, resume, callbacks) does NOT destroy the iframe! (FIX G)
@@ -308,7 +314,9 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
                 const YTState = window.YT!.PlayerState;
 
                 if (event.data === YTState.PLAYING) {
-                  playbackCoordinator.notifyPlaying(effectiveCoordinatorId);
+                  if (registerWithCoordinator !== false) {
+                    playbackCoordinator.notifyPlaying(effectiveCoordinatorId);
+                  }
                   setAutoplayBlocked(false);
                   onPlayRef.current?.();
                 } else if (event.data === YTState.PAUSED) {

@@ -374,12 +374,13 @@ export default function ImmersionViewer({
                 title={currentEdit.title}
                 aspectRatio={isPortrait ? "9:16" : "16:9"}
                 autoPlay={isPlaying}
-                coordinatorId="immersion-player"
+                registerWithCoordinator={false}
                 onEnded={handleNext}
                 onError={() => handlePlaybackError()}
                 onPlay={() => {
                   setIsPlaying(true);
                   setAutoplayBlocked(false);
+                  playbackCoordinator.notifyPlaying("immersion-player");
                 }}
                 onPause={() => setIsPlaying(false)}
                 onAutoplayBlocked={() => setAutoplayBlocked(true)}
@@ -403,6 +404,7 @@ export default function ImmersionViewer({
                 onPlay={() => {
                   setIsPlaying(true);
                   setAutoplayBlocked(false);
+                  playbackCoordinator.notifyPlaying("immersion-player");
                 }}
                 onPause={() => setIsPlaying(false)}
               />

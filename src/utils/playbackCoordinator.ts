@@ -75,6 +75,14 @@ class PlaybackCoordinator {
   getActivePlayerId(): string | null {
     return this.activePlayerId;
   }
+
+  /**
+   * Resets coordinator state and clears registered players (useful for tests and full resets).
+   */
+  reset(): void {
+    this.players.clear();
+    this.activePlayerId = null;
+  }
 }
 
 export const playbackCoordinator = new PlaybackCoordinator();

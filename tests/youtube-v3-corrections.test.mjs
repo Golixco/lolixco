@@ -423,6 +423,7 @@ test("V3 FIX 4: Enforces meaningful metadata freshness (stale, future-dated, and
           contentReviewStatus: "approved",
           assignedLolixcoId: 100,
           provenance: "youtube_data_api_v3",
+          metadataFetchStatus: "fetched",
           lastMetadataVerification: "2026-05-30T12:00:00Z", // 2 days old
           metadata: {
             canonicalVideoId: "freshVid001",

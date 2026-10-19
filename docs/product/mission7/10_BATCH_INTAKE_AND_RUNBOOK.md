@@ -78,20 +78,55 @@ node scripts/youtube-importer.mjs \
 [4. Audit Trail Log: content/audit/youtube-intake-audit.json]
        │
        ▼
-[5. Public Catalog Compilation: scripts/compile-youtube-catalog.mjs]
+[5. Owner Review & Approval: scripts/review-youtube-batch.mjs]
        │
        ▼
-[6. Full Quality Verification Suite]
+[6. Public Catalog Compilation: scripts/compile-youtube-catalog.mjs]
+       │
+       ▼
+[7. Full Quality Verification Suite]
 ```
 
-### Step 5: Review & Compile Approved Items into Catalog
+### Step 5: Owner Review & Approval Workflow
+
+Every imported video enters the audit trail as `embed_eligible`, `needs_review`, or `needs_recheck`. Real YouTube items are **never** automatically approved for public catalog compilation merely because they are embeddable. The owner inspects and confirms items explicitly.
+
+#### A. List Pending Records
+```bash
+node scripts/review-youtube-batch.mjs --list
+```
+
+#### B. Inspect Individual YouTube Record
+```bash
+node scripts/review-youtube-batch.mjs --show <videoId>
+```
+Displays title, channel creator, duration, privacy status, embeddability, category, fandoms, format hint, conflict warnings, and audit history.
+
+#### C. Approve Individual Items or Entire Batch
+```bash
+# Approve single item as landscape video:
+node scripts/review-youtube-batch.mjs --approve <videoId> --format video
+
+# Approve single item as portrait Short:
+node scripts/review-youtube-batch.mjs --approve <videoId> --format short
+
+# Approve all eligible verified items in an entire batch:
+node scripts/review-youtube-batch.mjs --approve-batch 01
+```
+
+#### D. Reject an Unsuitable Item
+```bash
+node scripts/review-youtube-batch.mjs --reject <videoId> --reason "Low audio quality / watermark"
+```
+
+### Step 6: Review & Compile Approved Items into Catalog
 
 To inspect the status breakdown of the intake audit log:
 ```bash
 node scripts/compile-youtube-catalog.mjs --review
 ```
 
-To validate and preview catalog generation without modifying production files:
+To validate and preview catalog generation in memory without modifying production files:
 ```bash
 node scripts/compile-youtube-catalog.mjs
 # or explicitly: node scripts/compile-youtube-catalog.mjs --preview
@@ -108,8 +143,9 @@ This updates `src/data/edits.ts` deterministically:
 - IDs 200–299: Curated portrait YouTube Shorts.
 - Fail-closed validation against mocks, private/unembeddable videos, duplicate IDs, unregistered fandoms, and incomplete metadata.
 - All internal audit notes and secrets are completely stripped.
+- Two-file write sequence is transactional: if catalog write or audit persistence fails, automatic rollback restores prior state.
 
-### Step 6: Verify Catalog & System Integrity
+### Step 7: Verify Catalog & System Integrity
 ```bash
 npm test
 npm run typecheck
@@ -120,9 +156,22 @@ npm run check:content
 npm run build
 ```
 
-## 5. Rollback Procedure
+## 5. Local Backup & Rollback Procedure
 
-If a batch needs to be revoked or re-processed:
-1. Revert `content/audit/youtube-intake-audit.json` to the previous git commit.
-2. Re-run `node scripts/compile-youtube-catalog.mjs --publish`.
-3. Verify that the production catalog cleanly returns to the expected state.
+Because `content/audit/youtube-intake-audit.json` contains private ingestion records and is gitignored, rollback does **not** rely on Git history. A local automated backup mechanism is built into the workflow.
+
+1. **Automatic Timestamped Backups**: Every write to the audit trail creates a timestamped snapshot in `content/audit/backups/`, e.g.:
+   `content/audit/backups/youtube-intake-audit.2026-10-19T12-30-00-000Z.bak.json`
+2. **Restoring a Previous Audit Snapshot**:
+   ```bash
+   node scripts/review-youtube-batch.mjs --restore content/audit/backups/<backup-file>.json
+   ```
+3. **Re-compiling Live Catalog**:
+   ```bash
+   node scripts/compile-youtube-catalog.mjs --publish
+   ```
+4. Verify system integrity:
+   ```bash
+   npm run check:content
+   npm test
+   ```

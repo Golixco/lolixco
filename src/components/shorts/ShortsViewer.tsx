@@ -461,9 +461,12 @@ export function ShortsViewer({
               autoPlay={true}
               muted={isMuted}
               controls={true}
-              coordinatorId="shorts-viewer"
+              registerWithCoordinator={false}
               onEnded={handleNext}
-              onPlay={() => setIsPlaying(true)}
+              onPlay={() => {
+                setIsPlaying(true);
+                playbackCoordinator.notifyPlaying("shorts-viewer");
+              }}
               onPause={() => setIsPlaying(false)}
               onError={() => {
                 setHasError(true);

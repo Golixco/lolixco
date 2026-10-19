@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 
 import {
   ingestYouTubeBatch,
@@ -19,11 +19,19 @@ import { registerMockVideo, clearMockVideos } from "../scripts/youtube-api.mjs";
 import { edits as baseEdits } from "../src/data/edits.ts";
 
 const FAKE_AUDIT_PATH = resolve("tests/scratch-youtube-audit.json");
+const FAKE_BACKUPS_PATH = resolve("tests/backups");
 
 function cleanupFakeAudit() {
   if (existsSync(FAKE_AUDIT_PATH)) {
     try {
       unlinkSync(FAKE_AUDIT_PATH);
+    } catch {
+      // Ignore
+    }
+  }
+  if (existsSync(FAKE_BACKUPS_PATH)) {
+    try {
+      rmSync(FAKE_BACKUPS_PATH, { recursive: true, force: true });
     } catch {
       // Ignore
     }

@@ -605,7 +605,17 @@ export function validateContentRecord(record, options = {}) {
   }
 
   // Schema Rule: Check unexpected properties (additionalProperties: false)
-  const allowedKeys = isLiveCatalog ? [...ALLOWED_RECORD_KEYS, "creator"] : ALLOWED_RECORD_KEYS;
+  const allowedKeys = isLiveCatalog
+    ? [
+        ...ALLOWED_RECORD_KEYS,
+        "creator",
+        "sourceType",
+        "youtubeVideoId",
+        "channelTitle",
+        "channelId",
+        "sourceUrl",
+      ]
+    : ALLOWED_RECORD_KEYS;
   for (const key of Object.keys(record)) {
     if (!allowedKeys.includes(key)) {
       errors.push(`Unexpected record property '${key}' (schema forbids additionalProperties)`);
@@ -945,6 +955,10 @@ export function validateContentRecord(record, options = {}) {
   if (record.poster !== undefined && record.poster !== null) {
     if (typeof record.poster !== "string" || !record.poster.trim()) {
       errors.push("Poster must be a non-empty string");
+    } else if (record.sourceType === "youtube_embed") {
+      if (!record.poster.startsWith("https://") && !record.poster.startsWith("http://")) {
+        errors.push(`YouTube embed poster must be a valid URL, got '${record.poster}'`);
+      }
     } else if (!POSTER_PATH_REGEX.test(record.poster.trim())) {
       errors.push(
         `Poster path '${record.poster}' does not match required pattern (must end in .svg, .png, .jpg, .jpeg, or .webp)`
@@ -973,6 +987,16 @@ export function validateContentRecord(record, options = {}) {
   if (record.source !== undefined && record.source !== null) {
     if (typeof record.source !== "string" || !record.source.trim()) {
       errors.push("Source video must be a non-empty string");
+    } else if (record.sourceType === "youtube_embed") {
+      if (
+        !/^https:\/\/(www\.)?youtube\.com\/watch\?v=[a-zA-Z0-9_-]{11}/.test(record.source) &&
+        !/^https:\/\/youtu\.be\/[a-zA-Z0-9_-]{11}/.test(record.source)
+      ) {
+        errors.push(`YouTube embed source must be a valid YouTube URL, got '${record.source}'`);
+      }
+      if (record.youtubeVideoId && !/^[a-zA-Z0-9_-]{11}$/.test(record.youtubeVideoId)) {
+        errors.push(`Invalid YouTube video ID '${record.youtubeVideoId}'`);
+      }
     } else if (!VIDEO_PATH_REGEX.test(record.source.trim())) {
       errors.push(
         `Source video path '${record.source}' does not match required pattern (must end in .mp4, .webm, or .m4v)`
@@ -1501,7 +1525,7 @@ export function validateContentManifest(manifest, options = {}) {
 /**
  * Validate the live TypeScript production catalog in src/data/edits.ts
  */
-export async function validateLiveCatalog(root = projectRoot) {
+export async function validateLiveCatalog(root = projectRoot, options = {}) {
   const editsModule = await import(resolve(root, "src/data/edits.ts"));
   const fandomsModule = await import(resolve(root, "src/data/fandoms.ts"));
 
@@ -1511,9 +1535,16 @@ export async function validateLiveCatalog(root = projectRoot) {
   const errors = [];
   const warnings = [];
 
-  // Invariant 1: Exactly 17 demo edits
-  if (!Array.isArray(edits) || edits.length !== 17) {
-    errors.push(`Live catalog edit count violation: expected exactly 17 edits, got ${edits?.length}`);
+  const allowExpanded = options.allowExpandedCatalog ?? false;
+  const isExpanded = allowExpanded || (Array.isArray(edits) && edits.length > 17);
+
+  // Invariant 1: Exactly 17 demo edits (or >= 17 if expanded)
+  if (!Array.isArray(edits)) {
+    errors.push(`Live catalog edit count violation: expected array of edits, got ${typeof edits}`);
+  } else if (!isExpanded && edits.length !== 17) {
+    errors.push(`Live catalog edit count violation: expected exactly 17 edits, got ${edits.length}`);
+  } else if (isExpanded && edits.length < 17) {
+    errors.push(`Expanded catalog must preserve at least the 17 baseline demo edits, got ${edits.length}`);
   }
 
   const seenIds = new Set();
@@ -1543,16 +1574,29 @@ export async function validateLiveCatalog(root = projectRoot) {
     for (const warn of itemResult.warnings) {
       warnings.push(`Live Edit ID ${edit.id}: ${warn}`);
     }
+
+    // For expanded catalog: enforce ID range policy for curated items beyond demo baseline
+    if (isExpanded && i >= 17) {
+      if (edit.format === "short") {
+        if (edit.id < 200 || edit.id > 299) {
+          errors.push(`Curated short ID ${edit.id} outside allowed range [200..299]`);
+        }
+      } else {
+        if (edit.id < 100 || edit.id > 199) {
+          errors.push(`Curated video ID ${edit.id} outside allowed range [100..199]`);
+        }
+      }
+    }
   }
 
-  // Invariant 2: Production contains zero fabricated Shorts
-  if (shortCount !== 0) {
+  // Invariant 2: Production contains zero fabricated Shorts (unless expanded catalog allows genuine shorts)
+  if (!isExpanded && shortCount !== 0) {
     errors.push(
       `Production catalog contains ${shortCount} Shorts. Invariant requires exactly 0 Shorts until owner media is received.`
     );
   }
 
-  // Invariant 3: IDs must be exactly 0 to 16
+  // Invariant 3: Baseline demo IDs must be exactly 0 to 16
   for (let expectedId = 0; expectedId < 17; expectedId++) {
     if (!seenIds.has(expectedId)) {
       errors.push(`Missing expected demo edit ID: ${expectedId}`);
@@ -1564,7 +1608,7 @@ export async function validateLiveCatalog(root = projectRoot) {
     errors,
     warnings,
     summary: {
-      total: edits.length,
+      total: edits ? edits.length : 0,
       videos: videoCount,
       shorts: shortCount,
     },
@@ -1645,6 +1689,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   let manifestPath = null;
   let mode = "metadata";
   let checkLive = true;
+  let allowExpanded = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--manifest" && args[i + 1]) {
@@ -1670,11 +1715,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       mode = "assets";
     } else if (args[i] === "--metadata") {
       mode = "metadata";
+    } else if (args[i] === "--allow-expanded") {
+      allowExpanded = true;
     } else if (args[i].endsWith(".json")) {
       manifestPath = resolve(args[i]);
       checkLive = false;
     } else {
-      console.error(`Error: Unrecognized option '${args[i]}'. Allowed options: --manifest <path>, --mode <${VALID_MODES.join("|")}>, --publish, --assets, --metadata`);
+      console.error(`Error: Unrecognized option '${args[i]}'. Allowed options: --manifest <path>, --mode <${VALID_MODES.join("|")}>, --publish, --assets, --metadata, --allow-expanded`);
       process.exit(1);
     }
   }
@@ -1720,7 +1767,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 
     if (checkLive) {
       console.log(`Validating live production catalog (src/data/edits.ts)...`);
-      const liveResult = await validateLiveCatalog(projectRoot);
+      const liveResult = await validateLiveCatalog(projectRoot, { allowExpandedCatalog: allowExpanded });
       console.log(
         `- Verified ${liveResult.summary.total} edits (${liveResult.summary.videos} videos, ${liveResult.summary.shorts} shorts)`
       );
@@ -1730,7 +1777,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         for (const err of liveResult.errors) console.error(`  x ${err}`);
         allValid = false;
       } else {
-        console.log(`OK: Live catalog verified (17 demo landscape edits, 0 shorts, 0 drift).`);
+        console.log(`OK: Live catalog verified (${liveResult.summary.total} edits, 0 drift).`);
       }
     }
 

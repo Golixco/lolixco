@@ -18,7 +18,7 @@
  * - Executable CLI with preview mode and explicit --publish required to write
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
@@ -34,7 +34,7 @@ try {
 
 import { allocateStableId, CANONICAL_CATEGORIES } from "./youtube-editorial.mjs";
 import { loadEnvConfig } from "./youtube-api.mjs";
-import { safeAtomicWriteFileSync } from "./youtube-importer.mjs";
+import { safeAtomicWriteFileSync, validateAuditDocument, createAuditBackup } from "./youtube-importer.mjs";
 export const CANONICAL_AUDIT_PATH = resolve(projectRoot, "content/audit/youtube-intake-audit.json");
 export const CANONICAL_OUTPUT_PATH = resolve(projectRoot, "src/data/edits.ts");
 
@@ -255,6 +255,7 @@ export async function compileYouTubeCatalog(options = {}) {
     outputPath = CANONICAL_OUTPUT_PATH,
     dryRun = true,
     allowDraft = false,
+    allowMocks = false,
     baseCatalog = null,
     maxMetadataAgeDays = 30,
     maxMetadataAgeMs = null,
@@ -306,6 +307,18 @@ export async function compileYouTubeCatalog(options = {}) {
     return {
       success: false,
       errors: [`Failed to parse audit file at ${auditFilePath}: ${err.message}. Preserving original file without modification.`],
+      warnings: [],
+      compiledCount: 0,
+      compiledEdits: currentBaseCatalog,
+      dryRun,
+    };
+  }
+
+  const auditValidation = validateAuditDocument(auditData, auditFilePath);
+  if (!auditValidation.valid) {
+    return {
+      success: false,
+      errors: auditValidation.errors,
       warnings: [],
       compiledCount: 0,
       compiledEdits: currentBaseCatalog,
@@ -377,9 +390,10 @@ export async function compileYouTubeCatalog(options = {}) {
         );
       }
 
-      if (item.metadataFetchStatus === "failed" || !item.metadata) {
+      // Positive allowlisting for genuine successful retrieval (FIX C)
+      if (item.metadataFetchStatus !== "fetched") {
         errors.push(
-          `Item '${videoId}': unfetched or failed metadata record cannot be published to production.`
+          `Item '${videoId}': unverified metadata retrieval status '${item.metadataFetchStatus}'. Positive evidence of successful API retrieval ('fetched') is required for production publication.`
         );
       }
 
@@ -415,7 +429,7 @@ export async function compileYouTubeCatalog(options = {}) {
       errors.push(`Item '${videoId}': missing genuine channel creator attribution.`);
     }
 
-    const durationSec = item.metadata.durationSec;
+    const durationSec = item.metadata.durationSec ?? item.metadata.durationSeconds;
     if (typeof durationSec !== "number" || durationSec <= 0) {
       errors.push(`Item '${videoId}': invalid or missing duration metadata.`);
     }
@@ -511,16 +525,79 @@ export async function compileYouTubeCatalog(options = {}) {
 
   const finalEdits = [...currentBaseCatalog.slice(0, 17), ...newEdits];
 
-  // 4. Write to output if not dryRun (FIX F: atomic writes)
+  // 4. Write to output if not dryRun (FIX F: atomic writes with transactional rollback)
   let writtenTo = null;
   if (!dryRun) {
-    const code = generateYouTubeEditsTs(finalEdits);
-    safeAtomicWriteFileSync(outputPath, code);
-    writtenTo = outputPath;
+    const catalogBackupPath = existsSync(outputPath) ? `${outputPath}.tmp.bak.${process.pid}.${Date.now()}` : null;
+    const auditBackupPath = existsSync(auditFilePath) ? `${auditFilePath}.tmp.bak.${process.pid}.${Date.now()}` : null;
 
-    // Persist newly assigned IDs back to audit file if updated
-    auditData.items = items;
-    safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
+    if (catalogBackupPath) {
+      copyFileSync(outputPath, catalogBackupPath);
+    }
+    if (auditBackupPath) {
+      copyFileSync(auditFilePath, auditBackupPath);
+    }
+    createAuditBackup(auditFilePath);
+
+    try {
+      const code = generateYouTubeEditsTs(finalEdits);
+      safeAtomicWriteFileSync(outputPath, code);
+      writtenTo = outputPath;
+
+      // Transition approved items to published status and record in audit history
+      for (const item of items) {
+        if (item.contentReviewStatus === "approved") {
+          item.contentReviewStatus = "published";
+          if (!Array.isArray(item.auditHistory)) item.auditHistory = [];
+          item.auditHistory.push({
+            date: new Date().toISOString(),
+            event: "publication",
+            status: "published",
+            assignedLolixcoId: item.assignedLolixcoId,
+          });
+        }
+      }
+
+      auditData.items = items;
+      auditData.lastPublished = new Date().toISOString();
+      safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
+
+      // Clean up temporary recovery backups
+      if (catalogBackupPath && existsSync(catalogBackupPath)) {
+        unlinkSync(catalogBackupPath);
+      }
+      if (auditBackupPath && existsSync(auditBackupPath)) {
+        unlinkSync(auditBackupPath);
+      }
+    } catch (writeErr) {
+      // Deterministic rollback: restore prior state
+      if (catalogBackupPath && existsSync(catalogBackupPath)) {
+        try {
+          copyFileSync(catalogBackupPath, outputPath);
+          unlinkSync(catalogBackupPath);
+        } catch {
+          // Ignore secondary cleanup error
+        }
+      }
+      if (auditBackupPath && existsSync(auditBackupPath)) {
+        try {
+          copyFileSync(auditBackupPath, auditFilePath);
+          unlinkSync(auditBackupPath);
+        } catch {
+          // Ignore secondary cleanup error
+        }
+      }
+      return {
+        success: false,
+        errors: [
+          `Catalog publication write failed: ${writeErr.message}. Deterministic rollback executed: catalog and audit files restored to pre-compilation state.`,
+        ],
+        warnings,
+        compiledCount: 0,
+        compiledEdits: currentBaseCatalog,
+        dryRun,
+      };
+    }
   }
 
   return {

@@ -14,10 +14,11 @@
  * - Executable CLI entrypoint with exit codes
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, copyFileSync } from "node:fs";
+import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
+import { fetchYouTubeVideoMetadata, loadEnvConfig } from "./youtube-api.mjs";
 
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 
@@ -53,11 +54,119 @@ export function safeAtomicWriteFileSync(filePath, content) {
 }
 
 import { normalizeYouTubeUrl } from "./youtube-normalizer.mjs";
-import { fetchYouTubeVideoMetadata, loadEnvConfig } from "./youtube-api.mjs";
 import {
   evaluateEditorialClassification,
   CANONICAL_CATEGORIES,
 } from "./youtube-editorial.mjs";
+
+/**
+ * Validates the structure and integrity of an audit JSON document.
+ * Enforces FIX B:
+ * - Top-level must be a non-null plain object (not array or primitive).
+ * - 'items' must be an array.
+ * - Each item must be a non-null object with a valid canonicalVideoId.
+ * - No duplicate canonicalVideoId inside items array.
+ * Returns { valid: boolean, errors: string[] }.
+ */
+export function validateAuditDocument(auditData, auditFilePath = "audit.json") {
+  const errors = [];
+
+  if (typeof auditData !== "object" || auditData === null || Array.isArray(auditData)) {
+    return {
+      valid: false,
+      errors: [
+        `Audit file at '${auditFilePath}' is structurally malformed: expected top-level JSON object, got ${Array.isArray(auditData) ? "array" : auditData === null ? "null" : typeof auditData}. File preserved byte-for-byte without mutation. Recovery: inspect file or restore from a timestamped backup in content/audit/backups/.`,
+      ],
+    };
+  }
+
+  if (!("items" in auditData) || !Array.isArray(auditData.items)) {
+    return {
+      valid: false,
+      errors: [
+        `Audit file at '${auditFilePath}' is structurally malformed: 'items' property must be an array (got ${typeof auditData.items}). File preserved byte-for-byte without mutation. Recovery: inspect file or restore from a timestamped backup in content/audit/backups/.`,
+      ],
+    };
+  }
+
+  const seenVideoIds = new Set();
+  for (let i = 0; i < auditData.items.length; i++) {
+    const item = auditData.items[i];
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      errors.push(
+        `Audit file at '${auditFilePath}' has invalid record at items[${i}]: expected record object, got ${item === null ? "null" : typeof item}.`
+      );
+      continue;
+    }
+
+    const videoId = item.canonicalVideoId;
+    if (!videoId || typeof videoId !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+      errors.push(
+        `Audit file at '${auditFilePath}' has invalid record at items[${i}]: missing or invalid canonicalVideoId ('${videoId}').`
+      );
+      continue;
+    }
+
+    if (seenVideoIds.has(videoId)) {
+      errors.push(
+        `Audit file at '${auditFilePath}' contains duplicate canonicalVideoId '${videoId}' at items[${i}]. Duplicate YouTube video ID conflict. Rejecting structurally malformed audit log to prevent data corruption. File preserved byte-for-byte without mutation.`
+      );
+      continue;
+    }
+    seenVideoIds.add(videoId);
+  }
+
+  if (errors.length > 0) {
+    errors.push(
+      `File preserved byte-for-byte without modification. Recovery: check content/audit/backups/ or restore via: node scripts/review-youtube-batch.mjs --restore <backup-file>`
+    );
+    return { valid: false, errors };
+  }
+
+  return { valid: true, errors: [] };
+}
+
+/**
+ * Creates a timestamped local backup of an audit file in content/audit/backups/
+ */
+export function createAuditBackup(auditFilePath) {
+  if (!existsSync(auditFilePath)) return null;
+
+  const baseDir = dirname(auditFilePath);
+  const backupDir = resolve(baseDir, "backups");
+  if (!existsSync(backupDir)) {
+    mkdirSync(backupDir, { recursive: true });
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const baseName = basename(auditFilePath, ".json");
+  const backupPath = resolve(backupDir, `${baseName}.${timestamp}.bak.json`);
+
+  try {
+    const content = readFileSync(auditFilePath, "utf-8");
+    safeAtomicWriteFileSync(backupPath, content);
+    return backupPath;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Restores an audit file from a local backup file.
+ */
+export function restoreAuditBackup(backupPath, targetAuditPath = CANONICAL_AUDIT_PATH) {
+  if (!existsSync(backupPath)) {
+    throw new Error(`Backup file not found at: ${backupPath}`);
+  }
+  const content = readFileSync(backupPath, "utf-8");
+  const parsed = JSON.parse(content);
+  const validation = validateAuditDocument(parsed, backupPath);
+  if (!validation.valid) {
+    throw new Error(`Cannot restore invalid backup: ${validation.errors.join("; ")}`);
+  }
+  safeAtomicWriteFileSync(targetAuditPath, content);
+  return true;
+}
 
 export const CANONICAL_AUDIT_PATH = resolve(projectRoot, "content/audit/youtube-intake-audit.json");
 
@@ -117,11 +226,13 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
       }
       return {
         url: item.url,
-        category: item.category || defaultCategory,
-        fandom: item.fandom || defaultFandom,
+        category: item.category || item.ownerCategory || defaultCategory,
+        fandom: item.fandom || item.ownerFandom || defaultFandom,
         fandomIds: Array.isArray(item.fandomIds)
           ? item.fandomIds
-          : (item.fandom ? [item.fandom] : (defaultFandom ? [defaultFandom] : [])),
+          : Array.isArray(item.ownerFandomIds)
+            ? item.ownerFandomIds
+            : (item.fandom ? [item.fandom] : (item.ownerFandom ? [item.ownerFandom] : (defaultFandom ? [defaultFandom] : []))),
       };
     });
   } else if (typeof input === "object" && input !== null) {
@@ -159,8 +270,12 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
  * @param {object} options
  * @returns {Promise<object>} Ingestion report
  */
-export async function ingestYouTubeBatch(options = {}) {
+export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {}) {
   loadEnvConfig();
+
+  const options = (Array.isArray(inputOrOptions) || typeof inputOrOptions === "string")
+    ? { ...maybeOptions, batchInput: inputOrOptions }
+    : inputOrOptions;
 
   const {
     batchId = `batch-${Date.now()}`,
@@ -220,11 +335,20 @@ export async function ingestYouTubeBatch(options = {}) {
   if (existsSync(auditFilePath)) {
     try {
       auditData = JSON.parse(readFileSync(auditFilePath, "utf-8"));
-      if (!Array.isArray(auditData.items)) auditData.items = [];
     } catch (err) {
       return {
         success: false,
-        errors: [`Failed to parse existing audit file at ${auditFilePath}: ${err.message}. Preserving original file without modification.`],
+        errors: [`Failed to parse existing audit file at ${auditFilePath}: ${err.message}. Preserving original file byte-for-byte without modification.`],
+        warnings,
+        processed: [],
+      };
+    }
+
+    const auditValidation = validateAuditDocument(auditData, auditFilePath);
+    if (!auditValidation.valid) {
+      return {
+        success: false,
+        errors: auditValidation.errors,
         warnings,
         processed: [],
       };
@@ -267,9 +391,9 @@ export async function ingestYouTubeBatch(options = {}) {
       canonicalVideoId: norm.videoId,
       canonicalUrl: norm.canonicalUrl,
       urlFormatHint: norm.urlFormatHint,
-      category: raw.category || category,
-      fandom: raw.fandom || fandom,
-      fandomIds: raw.fandomIds || (raw.fandom ? [raw.fandom] : (fandom ? [fandom] : [])),
+      category: raw.category || raw.ownerCategory || category,
+      fandom: raw.fandom || raw.ownerFandom || fandom,
+      fandomIds: raw.fandomIds || (raw.fandom ? [raw.fandom] : (raw.ownerFandom ? [raw.ownerFandom] : (fandom ? [fandom] : []))),
     });
 
     validVideoIdsToFetch.push(norm.videoId);
@@ -288,6 +412,20 @@ export async function ingestYouTubeBatch(options = {}) {
   let metadataResult;
   if (typeof options.fetchMetadata === "function") {
     metadataResult = await options.fetchMetadata(validVideoIdsToFetch);
+  } else if (typeof options.metadataFetcher === "function") {
+    const fetchedItems = [];
+    const missing = [];
+    const fetchErrors = [];
+    for (const vid of validVideoIdsToFetch) {
+      const res = await options.metadataFetcher(vid);
+      if (res && res.success && (res.data || res.metadata)) {
+        fetchedItems.push(res.data || res.metadata);
+      } else {
+        missing.push(vid);
+        if (res?.errors) fetchErrors.push(...res.errors);
+      }
+    }
+    metadataResult = { items: fetchedItems, missingIds: missing, errors: fetchErrors };
   } else if (options.apiClient?.fetchMetadata) {
     const fetchedItems = [];
     const missing = [];
@@ -360,34 +498,39 @@ export async function ingestYouTubeBatch(options = {}) {
     const auditHistory = Array.isArray(existing?.auditHistory) ? [...existing.auditHistory] : [];
 
     if (existing) {
-      if (existing.contentReviewStatus === "approved") {
+      const isPreviouslyReviewed =
+        existing.contentReviewStatus === "approved" ||
+        existing.contentReviewStatus === "published";
+
+      if (isPreviouslyReviewed) {
+        const targetStatus = existing.contentReviewStatus; // "approved" or "published"
         if (!metadata || missingIdSet.has(videoId)) {
           finalReviewStatus = "unavailable";
-          classification.warnings.push("Previously approved item is now unavailable or removed on YouTube.");
+          classification.warnings.push(`Previously ${targetStatus} item is now unavailable or removed on YouTube.`);
           auditHistory.push({
             date: new Date().toISOString(),
             event: "status_transition",
-            from: "approved",
+            from: targetStatus,
             to: "unavailable",
             reason: "video_unavailable_or_removed",
           });
         } else if (metadata.embeddable === false) {
           finalReviewStatus = "embed_restricted";
-          classification.warnings.push("Previously approved item embedding has been restricted.");
+          classification.warnings.push(`Previously ${targetStatus} item embedding has been restricted.`);
           auditHistory.push({
             date: new Date().toISOString(),
             event: "status_transition",
-            from: "approved",
+            from: targetStatus,
             to: "embed_restricted",
             reason: "embedding_disabled",
           });
         } else if (metadata.privacyStatus && metadata.privacyStatus !== "public") {
           finalReviewStatus = "unavailable";
-          classification.warnings.push(`Previously approved item privacyStatus changed to '${metadata.privacyStatus}'.`);
+          classification.warnings.push(`Previously ${targetStatus} item privacyStatus changed to '${metadata.privacyStatus}'.`);
           auditHistory.push({
             date: new Date().toISOString(),
             event: "status_transition",
-            from: "approved",
+            from: targetStatus,
             to: "unavailable",
             reason: `privacy_status_${metadata.privacyStatus}`,
           });
@@ -412,7 +555,7 @@ export async function ingestYouTubeBatch(options = {}) {
             auditHistory.push({
               date: new Date().toISOString(),
               event: "status_transition",
-              from: "approved",
+              from: targetStatus,
               to: "needs_recheck",
               reason: "editorial_classification_change",
               previousClassification: {
@@ -432,21 +575,21 @@ export async function ingestYouTubeBatch(options = {}) {
               Math.abs((existing.metadata.durationSec || 0) - (metadata.durationSec || 0)) > 5)
           ) {
             finalReviewStatus = "needs_recheck";
-            classification.warnings.push("Material changes detected in video metadata since approval. Transitioned to needs_recheck.");
+            classification.warnings.push(`Material changes detected in video metadata since ${targetStatus} status. Transitioned to needs_recheck.`);
             auditHistory.push({
               date: new Date().toISOString(),
               event: "status_transition",
-              from: "approved",
+              from: targetStatus,
               to: "needs_recheck",
               reason: "material_metadata_change",
             });
           } else {
-            // Metadata and classifications are valid and unchanged: preserve approved status!
-            finalReviewStatus = "approved";
+            // Metadata and classifications are valid and unchanged: preserve approved/published status!
+            finalReviewStatus = targetStatus;
             auditHistory.push({
               date: new Date().toISOString(),
               event: "reimport_verification",
-              status: "approved",
+              status: targetStatus,
               note: "Metadata and classifications verified unchanged",
             });
           }
@@ -498,6 +641,7 @@ export async function ingestYouTubeBatch(options = {}) {
 
   // 7. Save Audit Trail (unless dryRun)
   if (!dryRun) {
+    createAuditBackup(auditFilePath);
     auditData.items = Array.from(existingByVideoId.values());
     auditData.lastUpdated = new Date().toISOString();
     safeAtomicWriteFileSync(auditFilePath, JSON.stringify(auditData, null, 2));
