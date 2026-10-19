@@ -86,25 +86,17 @@ test("Mission 7C - Safe local environment configuration handling", () => {
   }
 });
 
-test("Mission 7C - API Key resolution: YOUTUBE_DATA_API_KEY takes priority over YOUTUBE_API_KEY", async () => {
-  const origDataKey = process.env.YOUTUBE_DATA_API_KEY;
-  const origKey = process.env.YOUTUBE_API_KEY;
-
-  try {
-    delete process.env.YOUTUBE_DATA_API_KEY;
-    delete process.env.YOUTUBE_API_KEY;
-
-    // 1. Neither key set -> fail closed with actionable error mentioning YOUTUBE_DATA_API_KEY
-    const failResult = await fetchYouTubeVideoMetadata(["0vswe8D3UTk"], { mockMode: false });
-    assert.equal(failResult.items.length, 0);
-    assert.ok(
-      failResult.errors.some((e) => e.includes("YOUTUBE_DATA_API_KEY") || e.includes("YOUTUBE_API_KEY")),
-      "Missing API key error must mention YOUTUBE_DATA_API_KEY"
-    );
-  } finally {
-    if (origDataKey !== undefined) process.env.YOUTUBE_DATA_API_KEY = origDataKey;
-    if (origKey !== undefined) process.env.YOUTUBE_API_KEY = origKey;
-  }
+test("Mission 7C - Safe offline API key validation and missing key error handling", async () => {
+  // Test offline missing API key fail-closed behavior deterministically without network calls:
+  const failResult = await fetchYouTubeVideoMetadata(["0vswe8D3UTk"], {
+    apiKey: "",
+    mockMode: false,
+  });
+  assert.equal(failResult.items.length, 0, "No items returned when API key is empty");
+  assert.ok(
+    failResult.errors.some((e) => e.includes("YOUTUBE_DATA_API_KEY") || e.includes("YOUTUBE_API_KEY")),
+    "Missing API key error must mention YOUTUBE_DATA_API_KEY"
+  );
 });
 
 test("Mission 7C - URL Normalization of all 10 JJK Landscape URLs", () => {
