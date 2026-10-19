@@ -418,7 +418,10 @@ export async function compileYouTubeCatalog(options = {}) {
     const isMock =
       item.isMock === true ||
       item.metadata?.isMock === true ||
-      item.provenance === "synthetic_mock";
+      item.provenance === "synthetic_mock" ||
+      item.metadata?.provenance === "synthetic_mock" ||
+      Boolean(item.syntheticOrigin) ||
+      Boolean(item.metadata?.syntheticOrigin);
 
     if (isTargetingProduction || !dryRun) {
       if (isMock) {
@@ -502,13 +505,33 @@ export async function compileYouTubeCatalog(options = {}) {
       }
     }
 
-    // G. Explicit confirmed format (FIX C)
+    // G. Explicit confirmed format (FIX B)
     if (item.format !== "video" && item.format !== "short") {
       errors.push(`Item '${videoId}': unconfirmed format '${item.format}'. Format must be explicitly confirmed as 'video' or 'short'.`);
-    } else if (item.format === "short" && item.formatConfirmed === false) {
-      errors.push(
-        `Item '${videoId}': candidate portrait short has formatConfirmed: false. Explicit editorial format confirmation is required before publication.`
-      );
+    } else if (item.format === "short") {
+      // Positively require formatConfirmed === true
+      if (item.formatConfirmed !== true) {
+        errors.push(
+          `Item '${videoId}': candidate portrait short requires positive format confirmation (formatConfirmed: true). Explicit editorial format confirmation is required before publication.`
+        );
+      }
+      // Positively require confirmedFormat === "short"
+      if (item.confirmedFormat !== "short") {
+        errors.push(
+          `Item '${videoId}': candidate portrait short requires confirmedFormat: 'short'. Explicit editorial format confirmation is required before publication.`
+        );
+      }
+    } else if (item.format === "video") {
+      if (item.formatConfirmed === true && item.confirmedFormat !== "video") {
+        errors.push(
+          `Item '${videoId}': contradictory format confirmation. Format is 'video' but confirmedFormat is '${item.confirmedFormat}'.`
+        );
+      }
+      if (item.confirmedFormat === "short") {
+        errors.push(
+          `Item '${videoId}': contradictory format confirmation. Format is 'video' but confirmedFormat is 'short'.`
+        );
+      }
     }
 
     // H. Canonical category & registered fandom check

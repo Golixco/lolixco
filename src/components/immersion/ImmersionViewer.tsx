@@ -20,6 +20,8 @@ import {
   Maximize,
   Minimize,
   AlertCircle,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 
 export interface ImmersionViewerProps {
@@ -50,6 +52,7 @@ export default function ImmersionViewer({
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isMuted, setIsMuted] = useState<boolean>(true);
 
   const currentEdit = session.currentEdit;
   const state = session.state;
@@ -185,10 +188,12 @@ export default function ImmersionViewer({
     playbackCoordinator.notifyPlaying("immersion-player");
     setIsPlaying(true);
     setAutoplayBlocked(false);
+    setIsMuted(false);
 
     if (currentEdit && isYouTubeEmbed(currentEdit)) {
       if (ytPlayerRef.current) {
         try {
+          ytPlayerRef.current.unMute();
           ytPlayerRef.current.playVideo();
         } catch {
           setAutoplayBlocked(true);
@@ -196,12 +201,35 @@ export default function ImmersionViewer({
         }
       }
     } else if (nativeVideoRef.current) {
+      nativeVideoRef.current.muted = false;
       nativeVideoRef.current.play().catch(() => {
         setAutoplayBlocked(true);
         setResumeError("Playback could not be resumed. Please interact with the page to allow audio/video.");
       });
     }
   }, [currentEdit]);
+
+  // User-controlled sound and unmute toggle
+  const handleToggleMute = useCallback(() => {
+    setIsMuted((prev) => {
+      const next = !prev;
+      if (nativeVideoRef.current) {
+        nativeVideoRef.current.muted = next;
+      }
+      if (ytPlayerRef.current) {
+        try {
+          if (next) {
+            ytPlayerRef.current.mute();
+          } else {
+            ytPlayerRef.current.unMute();
+          }
+        } catch {
+          // Guard against unmounted player
+        }
+      }
+      return next;
+    });
+  }, []);
 
   // Handle Playback Error with bounded skip retry
   const handlePlaybackError = useCallback(() => {
@@ -262,12 +290,16 @@ export default function ImmersionViewer({
           e.preventDefault();
           handleToggleFullscreen();
           break;
+        case "m":
+          e.preventDefault();
+          handleToggleMute();
+          break;
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleNext, handlePrevious, handleToggleFullscreen, handleTogglePlay, onClose]);
+  }, [handleNext, handlePrevious, handleToggleFullscreen, handleTogglePlay, handleToggleMute, onClose]);
 
   // Determine stage label
   const stageLabel = state.openingQueue.length > 0 || state.currentIndex < 3
@@ -305,6 +337,15 @@ export default function ImmersionViewer({
         </div>
 
         <div className="immersion-top-actions">
+          <button
+            type="button"
+            className="immersion-btn"
+            onClick={handleToggleMute}
+            aria-label={isMuted ? "Unmute audio (m)" : "Mute audio (m)"}
+            title={isMuted ? "Unmute audio (m)" : "Mute audio (m)"}
+          >
+            {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+          </button>
           <button
             type="button"
             className="immersion-btn"
@@ -374,6 +415,8 @@ export default function ImmersionViewer({
                 title={currentEdit.title}
                 aspectRatio={isPortrait ? "9:16" : "16:9"}
                 autoPlay={isPlaying}
+                muted={isMuted}
+                controls={true}
                 registerWithCoordinator={false}
                 onEnded={handleNext}
                 onError={() => handlePlaybackError()}
@@ -392,6 +435,7 @@ export default function ImmersionViewer({
                 src={currentEdit.source}
                 poster={currentEdit.poster}
                 autoPlay={isPlaying}
+                muted={isMuted}
                 playsInline
                 style={{
                   width: "100%",
@@ -460,6 +504,15 @@ export default function ImmersionViewer({
             title="Next edit (Right Arrow)"
           >
             <SkipForward size={18} />
+          </button>
+          <button
+            type="button"
+            className="immersion-btn"
+            onClick={handleToggleMute}
+            aria-label={isMuted ? "Unmute audio (m)" : "Mute audio (m)"}
+            title={isMuted ? "Unmute audio (m)" : "Mute audio (m)"}
+          >
+            {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
           </button>
         </div>
 

@@ -232,7 +232,15 @@ export async function approveReviewItem(videoId, options = {}) {
   // Must verify genuine positive API retrieval, availability, format, and metadata integrity.
 
   // 1. Synthetic mock rejection
-  if (item.isMock === true || item.metadata?.isMock === true || item.provenance === "synthetic_mock") {
+  const isSynthetic =
+    item.isMock === true ||
+    item.metadata?.isMock === true ||
+    item.provenance === "synthetic_mock" ||
+    item.metadata?.provenance === "synthetic_mock" ||
+    Boolean(item.syntheticOrigin) ||
+    Boolean(item.metadata?.syntheticOrigin);
+
+  if (isSynthetic) {
     errors.push(`Video '${videoId}' is marked as synthetic mock metadata. Real YouTube API records are required for approval.`);
   }
 
@@ -277,7 +285,7 @@ export async function approveReviewItem(videoId, options = {}) {
     }
   }
 
-  // 6. Confirmed Content Format ("video" or "short") (FIX C)
+  // 6. Confirmed Content Format ("video" or "short") (FIX B)
   let targetFormat = format;
   const isCandidateShort =
     targetFormat === "short" ||
@@ -286,12 +294,10 @@ export async function approveReviewItem(videoId, options = {}) {
   if (isCandidateShort) {
     // For portrait Shorts, require recorded manual confirmation before approval!
     // A /shorts/ URL or <= 180s duration alone does not prove portrait dimensions.
-    const isManuallyConfirmed =
-      targetFormat === "short" ||
-      (item.formatConfirmed === true && item.confirmedFormat === "short") ||
-      options.confirmShort === true;
+    const isExplicitlyConfirmedNow = options.confirmShort === true || options.confirmFormat === "short";
+    const hasRecordedFormatConfirmation = item.formatConfirmed === true && item.confirmedFormat === "short";
 
-    if (!isManuallyConfirmed) {
+    if (!hasRecordedFormatConfirmation && !isExplicitlyConfirmedNow) {
       errors.push(
         `Video '${videoId}': Candidate portrait Short requires recorded manual format confirmation before approval. A /shorts/ URL or <=180s duration does not prove portrait dimensions. Confirm format via --confirm-format or pass format: 'short'.`
       );
@@ -303,6 +309,13 @@ export async function approveReviewItem(videoId, options = {}) {
     targetFormat = targetFormat || item.confirmedFormat || item.format || "video";
     if (targetFormat !== "video") {
       errors.push(`Video '${videoId}' has invalid format '${targetFormat}'. Must be 'video' or 'short'.`);
+    }
+    // Reject contradictory format confirmation
+    if (item.formatConfirmed === true && item.confirmedFormat !== "video") {
+      errors.push(`Video '${videoId}': contradictory format confirmation. Target is 'video' but confirmedFormat is '${item.confirmedFormat}'.`);
+    }
+    if (item.confirmedFormat === "short") {
+      errors.push(`Video '${videoId}': contradictory format confirmation. Target is 'video' but confirmedFormat is 'short'.`);
     }
   }
 
@@ -333,6 +346,16 @@ export async function approveReviewItem(videoId, options = {}) {
 
   if (!Array.isArray(item.auditHistory)) {
     item.auditHistory = [];
+  }
+
+  if (targetFormat === "short" && (options.confirmShort === true || options.confirmFormat === "short")) {
+    item.auditHistory.push({
+      date: new Date().toISOString(),
+      event: "format_confirmation",
+      confirmedFormat: "short",
+      confirmedBy: options.approvedBy || "owner",
+      notes: "Explicit format confirmation recorded during review approval",
+    });
   }
 
   item.auditHistory.push({

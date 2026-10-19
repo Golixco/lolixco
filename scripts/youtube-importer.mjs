@@ -332,6 +332,13 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     mockMode = false,
   } = options;
 
+  const isSyntheticMode = Boolean(
+    mockMode ||
+    options.useMock ||
+    options.isMock ||
+    options.customMockMetadata
+  );
+
   const errors = [];
   const warnings = [];
 
@@ -758,9 +765,31 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
       lastMetadataVerification: isInconclusiveRefresh
         ? (existing?.lastMetadataVerification || null)
         : new Date().toISOString(),
-      metadata: isInconclusiveRefresh ? (existing?.metadata || null) : (metadata || null),
-      isMock: isInconclusiveRefresh ? (existing?.isMock === true) : (metadata?.isMock === true),
-      provenance: isInconclusiveRefresh ? (existing?.provenance || "unfetched") : (metadata?.provenance || "unfetched"),
+      metadata: isInconclusiveRefresh
+        ? (existing?.metadata || null)
+        : (metadata
+          ? {
+              ...metadata,
+              ...(isSyntheticMode || metadata.isMock === true || metadata.provenance === "synthetic_mock" || metadata.syntheticOrigin
+                ? {
+                    isMock: true,
+                    provenance: "synthetic_mock",
+                    syntheticOrigin: metadata.syntheticOrigin || "batch_importer_mock",
+                  }
+                : {}),
+            }
+          : null),
+      isMock: isInconclusiveRefresh
+        ? (existing?.isMock === true)
+        : Boolean(isSyntheticMode || metadata?.isMock === true || metadata?.provenance === "synthetic_mock" || metadata?.syntheticOrigin),
+      provenance: isInconclusiveRefresh
+        ? (existing?.provenance || "unfetched")
+        : (isSyntheticMode || metadata?.isMock === true || metadata?.provenance === "synthetic_mock" || metadata?.syntheticOrigin
+          ? "synthetic_mock"
+          : (metadata?.provenance || "unfetched")),
+      ...((isInconclusiveRefresh ? existing?.isMock === true : (isSyntheticMode || metadata?.isMock === true || metadata?.provenance === "synthetic_mock" || metadata?.syntheticOrigin))
+        ? { syntheticOrigin: existing?.syntheticOrigin || metadata?.syntheticOrigin || "batch_importer_mock" }
+        : {}),
       assignedLolixcoId: finalAssignedId,
       auditHistory,
     };

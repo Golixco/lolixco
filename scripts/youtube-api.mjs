@@ -185,7 +185,7 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   // Limit to 50 items per request
   const batch = uniqueIds.slice(0, 50);
 
-  const isMock = mockMode || Boolean(customMockMetadata);
+  const isMock = Boolean(mockMode || options.useMock || options.isMock || customMockMetadata);
 
   // FAIL CLOSED: Require a real API key for normal ingestion
   if (!isMock && (!apiKey || typeof apiKey !== "string" || !apiKey.trim())) {
@@ -235,9 +235,11 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
         } else {
           items.push({
             canonicalVideoId: id,
-            provenance: mock.provenance || "youtube_data_api_v3",
-            isMock: mock.isMock ?? false,
             ...mock,
+            // Guaranteed synthetic markers: caller-supplied fields can NEVER override synthetic mode
+            isMock: true,
+            provenance: "synthetic_mock",
+            syntheticOrigin: customMockMetadata && id in customMockMetadata ? "custom_mock_metadata" : "mock_database",
           });
         }
       } else {
@@ -261,6 +263,7 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
           regionRestriction: null,
           isMock: true,
           provenance: "synthetic_mock",
+          syntheticOrigin: "default_mock",
         });
       }
     }

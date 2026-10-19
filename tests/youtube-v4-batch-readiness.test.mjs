@@ -46,13 +46,17 @@ function createTempDir() {
 
 function makeValidAuditItem(canonicalVideoId, overrides = {}) {
   const now = new Date().toISOString();
+  const format = overrides.format || "video";
+  const isShort = format === "short";
   return {
     canonicalVideoId,
     canonicalUrl: `https://www.youtube.com/watch?v=${canonicalVideoId}`,
     submittedUrl: `https://youtu.be/${canonicalVideoId}`,
     ownerCategory: "Gaming",
     fandomIds: ["valorant"],
-    format: "video",
+    format,
+    formatConfirmed: overrides.formatConfirmed !== undefined ? overrides.formatConfirmed : (isShort ? true : false),
+    confirmedFormat: overrides.confirmedFormat !== undefined ? overrides.confirmedFormat : (isShort ? "short" : "video"),
     contentReviewStatus: "embed_eligible",
     assignedLolixcoId: null,
     provenance: "youtube_data_api_v3",
