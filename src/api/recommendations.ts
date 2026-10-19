@@ -141,6 +141,7 @@ export function computeLocalFallback(params: RecommendationParams): Recommendati
 
 export const EXPECTED_SCHEMA_VERSION = "1.0";
 export const EXPECTED_CATALOG_VERSION = "demo-catalog-v1";
+export const EXPECTED_CATALOG_VERSIONS: readonly string[] = [EXPECTED_CATALOG_VERSION, "catalog-v2"];
 export const SUPPORTED_API_MODE = "baseline";
 export const ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
 
@@ -259,7 +260,7 @@ export async function fetchRecommendations(
       envelope.request_id.length === 0 ||
       envelope.surface !== params.surface ||
       envelope.mode_used !== SUPPORTED_API_MODE ||
-      envelope.catalog_version !== EXPECTED_CATALOG_VERSION ||
+      !EXPECTED_CATALOG_VERSIONS.includes(envelope.catalog_version as string) ||
       typeof envelope.policy_version !== "string" ||
       envelope.policy_version.length === 0 ||
       !isValidIsoTimestamp(envelope.as_of) ||

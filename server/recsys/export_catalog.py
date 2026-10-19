@@ -94,6 +94,10 @@ ALLOWED_RECORD_FIELDS = {
     "source",
     "duration",
     "trending",
+    "format",
+    "fandomIds",
+    "sourceType",
+    "youtubeVideoId",
 }
 REQUIRED_RECORD_FIELDS = {
     "id",
@@ -228,6 +232,10 @@ def check_catalog_drift(
                 "source",
                 "duration",
                 "trending",
+                "format",
+                "fandomIds",
+                "sourceType",
+                "youtubeVideoId",
             ]:
                 live_val = live_item.get(field)
                 snap_val = snap_item.get(field)

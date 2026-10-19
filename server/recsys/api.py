@@ -138,6 +138,10 @@ class EditItemPayload(StrictBaseModel):
     source: str
     duration: str
     trending: bool
+    format: Optional[Literal["video", "short"]] = "video"
+    fandomIds: Optional[List[str]] = None
+    sourceType: Optional[Literal["local_demo", "youtube_embed", "licensed_local_media"]] = "local_demo"
+    youtubeVideoId: Optional[str] = None
 
 
 class RecommendedItemModel(StrictBaseModel):
@@ -427,6 +431,10 @@ def create_app(
                         source=item.edit.source,
                         duration=item.edit.duration,
                         trending=item.edit.trending,
+                        format=item.edit.format,
+                        fandomIds=list(item.edit.fandom_ids) if item.edit.fandom_ids else None,
+                        sourceType=item.edit.source_type,
+                        youtubeVideoId=item.edit.youtube_video_id if item.edit.youtube_video_id else None,
                     ),
                 )
             )

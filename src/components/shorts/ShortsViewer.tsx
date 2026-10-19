@@ -12,6 +12,8 @@ import {
 } from "lucide-react";
 import type { Edit } from "../../data/edits";
 import { getFandomById } from "../../data/fandoms";
+import YouTubePlayer, { type YouTubePlayerHandle } from "../video/YouTubePlayer";
+import { playbackCoordinator } from "../../utils/playbackCoordinator";
 
 export interface ShortsViewerProps {
   shorts: Edit[];
@@ -51,12 +53,14 @@ export function ShortsViewer({
   const [touchStartY, setTouchStartY] = useState<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const ytPlayerRef = useRef<YouTubePlayerHandle>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const previousActiveElement = useRef<HTMLElement | null>(null);
   const playRequestId = useRef(0);
   const lastNavTime = useRef(0);
 
   const currentShort = shorts[currentIndex];
+  const isYouTube = currentShort?.sourceType === "youtube_embed" && !!currentShort.youtubeVideoId;
 
   // Store active element for focus restoration on exit
   useEffect(() => {
@@ -102,8 +106,40 @@ export function ShortsViewer({
     }
   }, [activeShortId, currentIndex, currentShort?.id, initialShortId, shorts]);
 
+  // Register with playbackCoordinator for single-active audio exclusivity across Shorts and Featured player
+  useEffect(() => {
+    const unregister = playbackCoordinator.registerPlayer("shorts-viewer", () => {
+      setIsPlaying(false);
+      if (videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+      }
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.pauseVideo();
+        } catch {
+          // Guard against unmounted players
+        }
+      }
+    });
+
+    playbackCoordinator.notifyPlaying("shorts-viewer");
+
+    return () => {
+      unregister();
+    };
+  }, []);
+
   // Video playback lifecycle when currentIndex changes
   useEffect(() => {
+    if (isYouTube) {
+      setHasError(false);
+      setIsWaiting(false);
+      setCurrentTime(0);
+      setDuration(0);
+      setIsPlaying(true);
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -147,9 +183,20 @@ export function ShortsViewer({
     return () => {
       video.pause();
     };
-  }, [currentIndex]);
+  }, [currentIndex, isYouTube]);
 
   const togglePlay = useCallback(() => {
+    if (isYouTube) {
+      if (isPlaying) {
+        setIsPlaying(false);
+        ytPlayerRef.current?.pauseVideo();
+      } else {
+        setIsPlaying(true);
+        ytPlayerRef.current?.playVideo();
+      }
+      return;
+    }
+
     const video = videoRef.current;
     if (!video || hasError) return;
 
@@ -172,15 +219,26 @@ export function ShortsViewer({
       video.pause();
       setIsPlaying(false);
     }
-  }, [hasError]);
+  }, [hasError, isPlaying, isYouTube]);
 
   const toggleMute = useCallback(() => {
+    if (isYouTube) {
+      const nextMuted = !isMuted;
+      setIsMuted(nextMuted);
+      if (nextMuted) {
+        ytPlayerRef.current?.mute();
+      } else {
+        ytPlayerRef.current?.unMute();
+      }
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
     video.muted = !video.muted;
     setIsMuted(video.muted);
-  }, []);
+  }, [isMuted, isYouTube]);
 
   const handleNext = useCallback(() => {
     if (currentIndex < shorts.length - 1) {
@@ -209,6 +267,14 @@ export function ShortsViewer({
       e.stopPropagation();
       setHasError(false);
       setIsWaiting(true);
+
+      if (isYouTube) {
+        setIsPlaying(true);
+        setIsWaiting(false);
+        ytPlayerRef.current?.playVideo();
+        return;
+      }
+
       const video = videoRef.current;
       if (video) {
         video.load();
@@ -229,7 +295,7 @@ export function ShortsViewer({
           });
       }
     },
-    []
+    [isYouTube]
   );
 
   // Keyboard navigation & accessibility focus handling
@@ -384,40 +450,65 @@ export function ShortsViewer({
         </div>
 
         {/* Vertical Viewport Frame */}
-        <div className="shorts-viewer-frame" onClick={togglePlay}>
-          {/* Always keep video element mounted in DOM to guarantee ref and retry reliability */}
-          <video
-            ref={videoRef}
-            src={currentShort.source}
-            poster={currentShort.poster}
-            className="shorts-video-element"
-            style={{ display: hasError ? "none" : "block" }}
-            loop
-            playsInline
-            muted={isMuted}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-            onWaiting={() => setIsWaiting(true)}
-            onPlaying={() => {
-              setIsWaiting(false);
-              setIsPlaying(true);
-            }}
-            onTimeUpdate={() => {
-              if (videoRef.current) {
-                setCurrentTime(videoRef.current.currentTime);
-              }
-            }}
-            onLoadedMetadata={() => {
-              if (videoRef.current) {
-                setDuration(videoRef.current.duration);
-              }
-            }}
-            onError={() => {
-              setHasError(true);
-              setIsPlaying(false);
-              setIsWaiting(false);
-            }}
-          />
+        <div className="shorts-viewer-frame" onClick={isYouTube ? undefined : togglePlay}>
+          {isYouTube ? (
+            <YouTubePlayer
+              ref={ytPlayerRef}
+              videoId={currentShort.youtubeVideoId!}
+              title={currentShort.title}
+              poster={currentShort.poster}
+              aspectRatio="9:16"
+              autoPlay={true}
+              muted={isMuted}
+              controls={true}
+              registerWithCoordinator={false}
+              onEnded={handleNext}
+              onPlay={() => {
+                setIsPlaying(true);
+                playbackCoordinator.notifyPlaying("shorts-viewer");
+              }}
+              onPause={() => setIsPlaying(false)}
+              onError={() => {
+                setHasError(true);
+                setIsPlaying(false);
+                setIsWaiting(false);
+              }}
+            />
+          ) : (
+            /* Always keep video element mounted in DOM to guarantee ref and retry reliability for native video */
+            <video
+              ref={videoRef}
+              src={currentShort.source}
+              poster={currentShort.poster}
+              className="shorts-video-element"
+              style={{ display: hasError ? "none" : "block" }}
+              loop
+              playsInline
+              muted={isMuted}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onWaiting={() => setIsWaiting(true)}
+              onPlaying={() => {
+                setIsWaiting(false);
+                setIsPlaying(true);
+              }}
+              onTimeUpdate={() => {
+                if (videoRef.current) {
+                  setCurrentTime(videoRef.current.currentTime);
+                }
+              }}
+              onLoadedMetadata={() => {
+                if (videoRef.current) {
+                  setDuration(videoRef.current.duration);
+                }
+              }}
+              onError={() => {
+                setHasError(true);
+                setIsPlaying(false);
+                setIsWaiting(false);
+              }}
+            />
+          )}
 
           {hasError && (
             <div className="shorts-error-state" role="alert">
@@ -434,8 +525,8 @@ export function ShortsViewer({
             </div>
           )}
 
-          {/* Pause overlay watermark */}
-          {!isPlaying && !hasError && (
+          {/* Pause overlay watermark - only for native video */}
+          {!isYouTube && !isPlaying && !hasError && (
             <div className="shorts-pause-badge" aria-hidden="true">
               <Play size={44} />
             </div>
@@ -477,59 +568,61 @@ export function ShortsViewer({
             )}
           </div>
 
-          {/* Accessible Scrubbing progress slider */}
-          <div
-            className="shorts-progress-bar"
-            role="slider"
-            tabIndex={0}
-            aria-label="Seek short video"
-            aria-valuenow={Math.round(currentTime)}
-            aria-valuemin={0}
-            aria-valuemax={Math.round(duration || 100)}
-            aria-valuetext={`${formatTime(currentTime)} of ${formatTime(
-              duration
-            )}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              const rect = e.currentTarget.getBoundingClientRect();
-              const clickX = e.clientX - rect.left;
-              const newTime = (clickX / rect.width) * duration;
-              if (videoRef.current && isFinite(newTime)) {
-                videoRef.current.currentTime = newTime;
-                setCurrentTime(newTime);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "ArrowLeft") {
-                e.preventDefault();
-                e.stopPropagation();
-                const nextTime = Math.max(0, currentTime - 5);
-                if (videoRef.current) videoRef.current.currentTime = nextTime;
-                setCurrentTime(nextTime);
-              } else if (e.key === "ArrowRight") {
-                e.preventDefault();
-                e.stopPropagation();
-                const nextTime = Math.min(duration, currentTime + 5);
-                if (videoRef.current) videoRef.current.currentTime = nextTime;
-                setCurrentTime(nextTime);
-              } else if (e.key === "Home") {
-                e.preventDefault();
-                e.stopPropagation();
-                if (videoRef.current) videoRef.current.currentTime = 0;
-                setCurrentTime(0);
-              } else if (e.key === "End") {
-                e.preventDefault();
-                e.stopPropagation();
-                if (videoRef.current) videoRef.current.currentTime = duration;
-                setCurrentTime(duration);
-              }
-            }}
-          >
+          {/* Accessible Scrubbing progress slider - only for native video */}
+          {!isYouTube && (
             <div
-              className="shorts-progress-fill"
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
+              className="shorts-progress-bar"
+              role="slider"
+              tabIndex={0}
+              aria-label="Seek short video"
+              aria-valuenow={Math.round(currentTime)}
+              aria-valuemin={0}
+              aria-valuemax={Math.round(duration || 100)}
+              aria-valuetext={`${formatTime(currentTime)} of ${formatTime(
+                duration
+              )}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const newTime = (clickX / rect.width) * duration;
+                if (videoRef.current && isFinite(newTime)) {
+                  videoRef.current.currentTime = newTime;
+                  setCurrentTime(newTime);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const nextTime = Math.max(0, currentTime - 5);
+                  if (videoRef.current) videoRef.current.currentTime = nextTime;
+                  setCurrentTime(nextTime);
+                } else if (e.key === "ArrowRight") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const nextTime = Math.min(duration, currentTime + 5);
+                  if (videoRef.current) videoRef.current.currentTime = nextTime;
+                  setCurrentTime(nextTime);
+                } else if (e.key === "Home") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (videoRef.current) videoRef.current.currentTime = 0;
+                  setCurrentTime(0);
+                } else if (e.key === "End") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (videoRef.current) videoRef.current.currentTime = duration;
+                  setCurrentTime(duration);
+                }
+              }}
+            >
+              <div
+                className="shorts-progress-fill"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          )}
         </div>
 
         {/* Vertical Previous / Next Navigation Arrows */}
