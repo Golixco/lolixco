@@ -9,7 +9,16 @@ const __projectRoot = fileURLToPath(new URL("../", import.meta.url));
  */
 export function loadEnvConfig(rootDir = __projectRoot) {
   // Try Node.js built-in process.loadEnvFile first
+  // .env.local takes precedence over .env (standard dotenv / Vite / Next.js convention)
   if (typeof process.loadEnvFile === "function") {
+    const envLocalPath = resolve(rootDir, ".env.local");
+    if (existsSync(envLocalPath)) {
+      try {
+        process.loadEnvFile(envLocalPath);
+      } catch {
+        // Fallback below
+      }
+    }
     const envPath = resolve(rootDir, ".env");
     if (existsSync(envPath)) {
       try {
@@ -18,18 +27,10 @@ export function loadEnvConfig(rootDir = __projectRoot) {
         // Fallback below
       }
     }
-    const envLocalPath = resolve(rootDir, ".env.local");
-    if (existsSync(envLocalPath)) {
-      try {
-        process.loadEnvFile(envLocalPath);
-      } catch {
-        // Ignore
-      }
-    }
   }
 
-  // Fallback manual parser to ensure .env loading across platforms
-  const targetFiles = [".env", ".env.local"];
+  // Fallback manual parser to ensure .env.local / .env loading across platforms
+  const targetFiles = [".env.local", ".env"];
   for (const file of targetFiles) {
     const fullPath = resolve(rootDir, file);
     if (existsSync(fullPath)) {
@@ -165,7 +166,7 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
   loadEnvConfig();
 
   const {
-    apiKey = process.env.YOUTUBE_API_KEY,
+    apiKey = process.env.YOUTUBE_DATA_API_KEY || process.env.YOUTUBE_API_KEY,
     mockMode = false,
     customMockMetadata = null,
     timeoutMs = 10000,
@@ -193,7 +194,7 @@ export async function fetchYouTubeVideoMetadata(videoIds, options = {}) {
       items: [],
       missingIds: batch,
       errors: [
-        "YouTube API key is missing. Set YOUTUBE_API_KEY in .env or pass --mock for offline testing.",
+        "YouTube API key is missing. Set YOUTUBE_DATA_API_KEY (or YOUTUBE_API_KEY) in .env.local or .env, or pass --mock for offline testing.",
       ],
     };
   }

@@ -193,7 +193,7 @@ export async function loadFandomRegistry() {
  * Parses batch input from string, array, or object.
  * Returns array of normalized entries: { url, category, fandom, fandomIds }.
  */
-export function parseBatchInput(input, defaultCategory = "", defaultFandom = "") {
+export function parseBatchInput(input, defaultCategory = "", defaultFandom = "", defaultFormat = "") {
   let items = [];
 
   if (typeof input === "string") {
@@ -201,7 +201,7 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         const parsed = JSON.parse(trimmed);
-        return parseBatchInput(parsed, defaultCategory, defaultFandom);
+        return parseBatchInput(parsed, defaultCategory, defaultFandom, defaultFormat);
       } catch {
         // Fall back to line-by-line parsing
       }
@@ -214,6 +214,7 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
       category: defaultCategory,
       fandom: defaultFandom,
       fandomIds: defaultFandom ? [defaultFandom] : [],
+      format: defaultFormat,
       hasExplicitCategory: Boolean(defaultCategory && defaultCategory.trim()),
       hasExplicitFandom: Boolean(defaultFandom && defaultFandom.trim()),
     }));
@@ -225,6 +226,7 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
           category: defaultCategory,
           fandom: defaultFandom,
           fandomIds: defaultFandom ? [defaultFandom] : [],
+          format: defaultFormat,
           hasExplicitCategory: Boolean(defaultCategory && defaultCategory.trim()),
           hasExplicitFandom: Boolean(defaultFandom && defaultFandom.trim()),
         };
@@ -245,6 +247,7 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
         url: item.url,
         category: item.category || item.ownerCategory || defaultCategory,
         fandom: item.fandom || item.ownerFandom || defaultFandom,
+        format: item.format || item.ownerFormat || defaultFormat,
         fandomIds: Array.isArray(item.fandomIds)
           ? item.fandomIds
           : Array.isArray(item.ownerFandomIds)
@@ -269,12 +272,15 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
       ? input.fandomIds
       : (batchFan ? [batchFan] : []);
 
+    const batchFormat = input.format || input.ownerFormat || defaultFormat;
+
     if (Array.isArray(input.urls)) {
       items = input.urls.map((url) => ({
         url,
         category: batchCat,
         fandom: batchFan,
         fandomIds: batchFandomIds,
+        format: batchFormat,
         hasExplicitCategory: hasBatchCat,
         hasExplicitFandom: hasBatchFan,
       }));
@@ -295,6 +301,7 @@ export function parseBatchInput(input, defaultCategory = "", defaultFandom = "")
           url: item.url,
           category: item.category || item.ownerCategory || batchCat,
           fandom: item.fandom || item.ownerFandom || batchFan,
+          format: item.format || item.ownerFormat || batchFormat,
           fandomIds: Array.isArray(item.fandomIds)
             ? item.fandomIds
             : (item.fandom ? [item.fandom] : batchFandomIds),
@@ -321,12 +328,13 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     ? { ...maybeOptions, batchInput: inputOrOptions }
     : inputOrOptions;
 
-  const batchId = options.batchId || options["batch-id"] || `batch-${Date.now()}`;
-  const batchFile = options.batchFile || options["batch-file"] || options.batchPath || options["batch-path"];
+  const batchId = options.batchId || options["batch-id"] || options.batch || `batch-${Date.now()}`;
+  const batchFile = options.batchFile || options["batch-file"] || options.batchPath || options["batch-path"] || options.input;
   const {
     batchInput,
     category = "",
     fandom = "",
+    format = "",
     auditFilePath = CANONICAL_AUDIT_PATH,
     dryRun = false,
     mockMode = false,
@@ -378,9 +386,9 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
       };
     }
     const content = readFileSync(resolvedPath, "utf-8");
-    rawItems = parseBatchInput(content, category, fandom);
+    rawItems = parseBatchInput(content, category, fandom, format);
   } else if (batchInput) {
-    rawItems = parseBatchInput(batchInput, category, fandom);
+    rawItems = parseBatchInput(batchInput, category, fandom, format);
   }
 
   // 2. Strict Limit: At most 10 URLs per batch
@@ -467,6 +475,7 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
       urlFormatHint: norm.urlFormatHint,
       category: raw.category || raw.ownerCategory || category,
       fandom: raw.fandom || raw.ownerFandom || fandom,
+      format: raw.format || raw.ownerFormat || format,
       fandomIds: raw.fandomIds || (raw.fandom ? [raw.fandom] : (raw.ownerFandom ? [raw.ownerFandom] : (fandom ? [fandom] : []))),
       hasExplicitCategory: raw.hasExplicitCategory ?? Boolean((raw.category || raw.ownerCategory || category || "").trim()),
       hasExplicitFandom: raw.hasExplicitFandom ?? Boolean((raw.fandom || raw.ownerFandom || fandom || "").trim() || (Array.isArray(raw.fandomIds) && raw.fandomIds.length > 0)),
@@ -633,6 +642,7 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
         metadata,
         registeredFandoms,
         urlFormatHint: effectiveFormat,
+        ownerFormat: entry.format || options.format || options.ownerFormat,
       });
     } else {
       classification = {
@@ -877,6 +887,7 @@ export async function runImporterCli(args = process.argv.slice(2)) {
     batchId: `batch-${Date.now()}`,
     category: "",
     fandom: "",
+    format: "",
     batchPath: "",
     urls: [],
     dryRun: false,
@@ -897,6 +908,7 @@ Options:
   --batch, --batch-id <id>     Batch identifier (e.g. 01, batch-01, batch-10)
   --category <name>            Category (Anime, Gaming, Movies, Series, Phonk, Multifandom)
   --fandom <slug>              Fandom slug (e.g. valorant, jujutsu-kaisen)
+  --format <type>              Format (video, landscape, short)
   --input, --batch-file <file> Input file (.txt with 1 URL per line or .json)
   --urls <u1,u2>               Comma-separated list of YouTube URLs
   --dry-run                    Simulate import without writing to audit file
@@ -911,6 +923,8 @@ Options:
       options.category = args[++i];
     } else if (arg === "--fandom" && args[i + 1]) {
       options.fandom = args[++i];
+    } else if ((arg === "--format" || arg === "--owner-format") && args[i + 1]) {
+      options.format = args[++i];
     } else if ((arg === "--input" || arg === "--batch-file") && args[i + 1]) {
       options.batchPath = args[++i];
     } else if (arg === "--urls" && args[i + 1]) {
@@ -939,6 +953,7 @@ Options:
     batchId: options.batchId,
     category: options.category,
     fandom: options.fandom,
+    format: options.format,
     batchPath: options.batchPath || undefined,
     batchInput,
     dryRun: options.dryRun,
