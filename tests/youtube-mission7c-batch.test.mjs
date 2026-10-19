@@ -243,56 +243,98 @@ test("Mission 7C - End-to-end ingestion and review workflow with 10 JJK landscap
       "Must reject synthetic records from live catalog publication"
     );
 
-    // 3. Simulate verified API retrieval items (with positive YouTube API v3 provenance)
-    // to test legitimate approval and preview compilation ID range allocation:
-    auditData.items = auditData.items.map((item, idx) => ({
-      ...item,
-      isMock: false,
-      provenance: "youtube_data_api_v3",
-      syntheticOrigin: null,
-      metadata: {
-        ...item.metadata,
-        title: `Jujutsu Kaisen - High Voltage Sequence #${idx + 1}`,
-        channelTitle: "JJK Visuals",
-        durationSec: 120,
-        durationSeconds: 120,
-        durationFormatted: "2:00",
-        embeddable: true,
-        privacyStatus: "public",
-        isMock: false,
-        provenance: "youtube_data_api_v3",
-        syntheticOrigin: null,
-      },
-    }));
-    writeFileSync(tmpAuditPath, JSON.stringify(auditData, null, 2));
+    // 3. Exercise official YouTube Data API client pathway via offline HTTP stub
+    const originalFetch = globalThis.fetch;
+    const testOfficialAuditPath = resolve(tmpDir, "official-audit.json");
 
-    const realApproveResult = await approveBatch("jjk-landscape-batch-01", {
-      auditFilePath: tmpAuditPath,
-    });
-    assert.equal(realApproveResult.success, true, "Legitimate YouTube Data API batch approval must succeed");
-    assert.equal(realApproveResult.approvedCount, 10, "Must approve all 10 verified items");
+    try {
+      globalThis.fetch = async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes("googleapis.com/youtube/v3/videos")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: JJK_VIDEO_IDS.map((id, idx) => ({
+                id,
+                snippet: {
+                  title: `Jujutsu Kaisen - High Voltage Sequence #${idx + 1}`,
+                  description: `Jujutsu Kaisen landscape edit #${idx + 1} #anime #jjk`,
+                  channelId: `UC_jjk_channel_${idx + 1}`,
+                  channelTitle: "JJK Visuals",
+                  publishedAt: "2026-01-10T12:00:00Z",
+                  thumbnails: {
+                    high: { url: `https://i.ytimg.com/vi/${id}/hqdefault.jpg` },
+                  },
+                },
+                contentDetails: {
+                  duration: "PT2M",
+                },
+                status: {
+                  embeddable: true,
+                  privacyStatus: "public",
+                },
+              })),
+            }),
+          };
+        }
+        return { ok: false, status: 404, text: async () => "Not Found" };
+      };
 
-    // 4. Verify compiler dry-run preview allocates stable IDs in range 100-109
-    const compilePreview = await compileYouTubeCatalog({
-      auditFilePath: tmpAuditPath,
-      preview: true,
-    });
+      // Ingest through normal production client pathway without mockMode
+      const officialIngestResult = await ingestYouTubeBatch({
+        batchId: "jjk-landscape-batch-01",
+        category: "Anime",
+        fandom: "jujutsu-kaisen",
+        format: "video",
+        batchPath: resolve(projectRoot, "content/batches/jjk-landscape-batch-01.json"),
+        auditFilePath: testOfficialAuditPath,
+        apiKey: "AIzaSyTestOfficialKeyStubForUnitTestingOnly",
+        dryRun: false,
+        mockMode: false,
+      });
 
-    assert.equal(compilePreview.success, true, "Compilation preview must succeed on approved items");
-    assert.equal(compilePreview.baseCount, 17, "Base count must be 17");
-    assert.equal(compilePreview.newCount, 10, "New compiled edits must be 10");
-    assert.equal(compilePreview.totalCount, 27, "Total compiled edits must be 27");
+      assert.equal(officialIngestResult.success, true, "Official API ingestion must succeed");
+      assert.equal(officialIngestResult.processedCount, 10, "Must process 10 items through official API client");
 
-    // Verify allocated IDs are in [100..109]
-    const compiledNewEdits = compilePreview.compiledEdits.slice(17);
-    assert.equal(compiledNewEdits.length, 10, "10 new edits compiled after 17 demo edits");
-    for (let i = 0; i < 10; i++) {
-      assert.equal(compiledNewEdits[i].id, 100 + i, `Landscape item #${i} must have ID ${100 + i}`);
-      assert.equal(compiledNewEdits[i].category, "Anime");
-      assert.deepEqual(compiledNewEdits[i].fandomIds, ["jujutsu-kaisen"]);
-      assert.equal(compiledNewEdits[i].format, "video");
-      assert.equal(compiledNewEdits[i].sourceType, "youtube_embed");
-      assert.equal(compiledNewEdits[i].youtubeVideoId, JJK_VIDEO_IDS[i]);
+      // Verify the generated audit trail has genuine provenance produced by the production client
+      const officialAudit = JSON.parse(readFileSync(testOfficialAuditPath, "utf-8"));
+      for (const item of officialAudit.items) {
+        assert.equal(item.isMock, false, "Must not be marked mock");
+        assert.equal(item.provenance, "youtube_data_api_v3", "Must have genuine youtube_data_api_v3 provenance");
+        assert.equal(item.contentReviewStatus, "embed_eligible");
+      }
+
+      const realApproveResult = await approveBatch("jjk-landscape-batch-01", {
+        auditFilePath: testOfficialAuditPath,
+      });
+      assert.equal(realApproveResult.success, true, "Legitimate YouTube Data API batch approval must succeed");
+      assert.equal(realApproveResult.approvedCount, 10, "Must approve all 10 verified items");
+
+      // 4. Verify compiler dry-run preview allocates stable IDs in range 100-109
+      const compilePreview = await compileYouTubeCatalog({
+        auditFilePath: testOfficialAuditPath,
+        preview: true,
+      });
+
+      assert.equal(compilePreview.success, true, "Compilation preview must succeed on approved items");
+      assert.equal(compilePreview.baseCount, 17, "Base count must be 17");
+      assert.equal(compilePreview.newCount, 10, "New compiled edits must be 10");
+      assert.equal(compilePreview.totalCount, 27, "Total compiled edits must be 27");
+
+      // Verify allocated IDs are in [100..109]
+      const compiledNewEdits = compilePreview.compiledEdits.slice(17);
+      assert.equal(compiledNewEdits.length, 10, "10 new edits compiled after 17 demo edits");
+      for (let i = 0; i < 10; i++) {
+        assert.equal(compiledNewEdits[i].id, 100 + i, `Landscape item #${i} must have ID ${100 + i}`);
+        assert.equal(compiledNewEdits[i].category, "Anime");
+        assert.deepEqual(compiledNewEdits[i].fandomIds, ["jujutsu-kaisen"]);
+        assert.equal(compiledNewEdits[i].format, "video");
+        assert.equal(compiledNewEdits[i].sourceType, "youtube_embed");
+        assert.equal(compiledNewEdits[i].youtubeVideoId, JJK_VIDEO_IDS[i]);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
     }
 
     // Baseline catalog in src/data/edits.ts remains untouched
