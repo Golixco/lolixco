@@ -332,11 +332,32 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     mockMode = false,
   } = options;
 
+  const isInjectedFetcher = Boolean(
+    typeof options.fetchMetadata === "function" ||
+    typeof options.metadataFetcher === "function" ||
+    typeof options.apiClient?.fetchMetadata === "function" ||
+    typeof options.apiClient === "function"
+  );
+
+  let detectedSyntheticOrigin = null;
+  if (typeof options.fetchMetadata === "function") {
+    detectedSyntheticOrigin = "injected_fetch_metadata";
+  } else if (typeof options.metadataFetcher === "function") {
+    detectedSyntheticOrigin = "injected_metadata_fetcher";
+  } else if (typeof options.apiClient?.fetchMetadata === "function" || typeof options.apiClient === "function") {
+    detectedSyntheticOrigin = "injected_api_client";
+  } else if (options.customMockMetadata) {
+    detectedSyntheticOrigin = "custom_mock_metadata";
+  } else if (mockMode || options.useMock || options.isMock) {
+    detectedSyntheticOrigin = "batch_importer_mock";
+  }
+
   const isSyntheticMode = Boolean(
     mockMode ||
     options.useMock ||
     options.isMock ||
-    options.customMockMetadata
+    options.customMockMetadata ||
+    isInjectedFetcher
   );
 
   const errors = [];
@@ -499,15 +520,18 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
       retryableIds: retryable,
       errors: fetchErrors,
     };
-  } else if (options.apiClient?.fetchMetadata) {
+  } else if (options.apiClient?.fetchMetadata || typeof options.apiClient === "function") {
     const fetchedItems = [];
     const missing = [];
     const incomplete = [];
     const confirmedUnavailable = [];
     const retryable = [];
     const fetchErrors = [];
+    const clientFetch = typeof options.apiClient === "function"
+      ? options.apiClient
+      : options.apiClient.fetchMetadata.bind(options.apiClient);
     for (const vid of validVideoIdsToFetch) {
-      const res = await options.apiClient.fetchMetadata(vid);
+      const res = await clientFetch(vid);
       if (res && res.success && (res.data || res.metadata)) {
         fetchedItems.push(res.data || res.metadata);
       } else {
@@ -535,6 +559,21 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
     metadataResult = await fetchYouTubeVideoMetadata(validVideoIdsToFetch, {
       mockMode: mockMode || options.useMock || Boolean(options.customMockMetadata),
       customMockMetadata: options.customMockMetadata,
+    });
+  }
+
+  // Centralized provenance policy:
+  // If in synthetic mode (mockMode, customMockMetadata, or injected fetchers),
+  // caller-supplied provenance, isMock, or fetchStatus fields can NEVER disguise test data as real API retrieval.
+  if (isSyntheticMode && Array.isArray(metadataResult?.items)) {
+    metadataResult.items = metadataResult.items.map((rawItem) => {
+      if (!rawItem || typeof rawItem !== "object") return rawItem;
+      return {
+        ...rawItem,
+        isMock: true,
+        provenance: "synthetic_mock",
+        syntheticOrigin: rawItem.syntheticOrigin || detectedSyntheticOrigin || "batch_importer_mock",
+      };
     });
   }
 
@@ -774,7 +813,7 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
                 ? {
                     isMock: true,
                     provenance: "synthetic_mock",
-                    syntheticOrigin: metadata.syntheticOrigin || "batch_importer_mock",
+                    syntheticOrigin: metadata.syntheticOrigin || detectedSyntheticOrigin || "batch_importer_mock",
                   }
                 : {}),
             }
@@ -788,7 +827,7 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
           ? "synthetic_mock"
           : (metadata?.provenance || "unfetched")),
       ...((isInconclusiveRefresh ? existing?.isMock === true : (isSyntheticMode || metadata?.isMock === true || metadata?.provenance === "synthetic_mock" || metadata?.syntheticOrigin))
-        ? { syntheticOrigin: existing?.syntheticOrigin || metadata?.syntheticOrigin || "batch_importer_mock" }
+        ? { syntheticOrigin: (isInconclusiveRefresh ? existing?.syntheticOrigin : null) || metadata?.syntheticOrigin || detectedSyntheticOrigin || "batch_importer_mock" }
         : {}),
       assignedLolixcoId: finalAssignedId,
       auditHistory,

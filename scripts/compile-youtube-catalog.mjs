@@ -341,6 +341,27 @@ export async function compileYouTubeCatalog(options = {}) {
     }
   }
 
+  // Fail-closed synthetic mock prohibition:
+  // When compiling for publication (dryRun: false), synthetic mock items from any test hook
+  // are strictly prohibited from catalog publication.
+  if (!dryRun) {
+    for (const item of items) {
+      const isMock =
+        item.isMock === true ||
+        item.metadata?.isMock === true ||
+        item.provenance === "synthetic_mock" ||
+        item.metadata?.provenance === "synthetic_mock" ||
+        Boolean(item.syntheticOrigin) ||
+        Boolean(item.metadata?.syntheticOrigin);
+
+      if (isMock) {
+        errors.push(
+          `Item '${item.canonicalVideoId}': synthetic mock metadata is prohibited from production catalog publication. Real YouTube API metadata is required.`
+        );
+      }
+    }
+  }
+
   // Build historical allocation registry from every historical assigned ID in audit (FIX B)
   const historicalIdToVideoMap = new Map();
   const historicalVideoToIdMap = new Map();
