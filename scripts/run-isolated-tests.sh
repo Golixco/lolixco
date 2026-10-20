@@ -164,6 +164,7 @@ fi
 
 # 8. Launch unshare with isolated network and user namespace (-rn),
 # configure loopback, and invoke this script inside the namespace
+echo "[LOLIXCO LAUNCHER] Establishing new isolated kernel network namespace via unshare..." >&2
 LOOPBACK_CMD="$IP_BIN link set lo up || { echo '[LOLIXCO SECURITY FATAL] Failed to configure loopback in isolated network namespace' >&2; exit 1; }; exec \"\$@\""
 
 exec "$ENV_BIN" -i \

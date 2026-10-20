@@ -1158,6 +1158,11 @@ test("STAGE 1 AT-1.6i: Real launcher execution - Literal argument preservation t
       false,
       "Shell metacharacters in arguments must NOT be evaluated by shell launcher"
     );
+    assert.equal(
+      launcherChild.stderr.includes("[LOLIXCO LAUNCHER] Establishing new isolated kernel network namespace"),
+      false,
+      "Already-isolated execution must NOT trigger namespace creation branch"
+    );
 
     const match = launcherChild.stdout.match(/RECEIVED_RAW_ARGS:(.+)/);
     assert.ok(match, "Launcher must pass literal arguments to test runner");
@@ -1166,17 +1171,33 @@ test("STAGE 1 AT-1.6i: Real launcher execution - Literal argument preservation t
     assert.equal(receivedArgs[2], maliciousArg2, "Argument 2 must be preserved literally in already-isolated branch");
 
     // 2. Argument preservation through the namespace-creation shell path (scripts/run-isolated-tests.sh:165-183)
-    // Use a controlled harness in a mount namespace with simulated unisolated /proc/net (non-lo interface and route)
-    // so is_already_isolated returns false and forces execution of the unshare -rn creation branch
+    // Uses a controlled harness in a user+net namespace where veth interfaces and routes are created natively,
+    // establishing genuine unisolated /proc/net/dev and /proc/net/route state.
+    // The harness fails immediately on any setup error, verifies the pre-creation state,
+    // and asserts that the namespace-creation branch actually executed.
     const harnessChild = rawSpawnSync("/usr/bin/unshare", [
-      "-rm",
+      "-rn",
       "/bin/bash",
       "-c",
       `
-        MNT_NET="$(mktemp -d)"
-        printf "Inter-| Receive | Transmit\\n lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\\n eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\\n" > "$MNT_NET/dev"
-        printf "Iface\\tDestination\\tGateway\\neth0\\t00000000\\t0101A8C0\\n" > "$MNT_NET/route"
-        mount --bind "$MNT_NET" /proc/net
+        set -euo pipefail
+        # Setup simulated unisolated state with virtual network interface and routing entry
+        ip link add name eth0 type veth peer name veth1
+        ip link set eth0 up
+        ip route add 192.168.1.0/24 dev eth0
+
+        # Verify that the unisolated pre-creation state is visible in /proc/net before launching:
+        if ! grep -q "eth0" /proc/net/dev; then
+          echo "[HARNESS FATAL] Simulated eth0 device not present in /proc/net/dev" >&2
+          exit 2
+        fi
+        if ! grep -q "eth0" /proc/net/route; then
+          echo "[HARNESS FATAL] Simulated external route not present in /proc/net/route" >&2
+          exit 3
+        fi
+        echo "[HARNESS PRE-STATE VERIFIED] /proc/net/dev and route contain eth0" >&2
+
+        # Execute launcher - must take the unshare -rn creation branch because it is not yet isolated
         exec "${launcherPath}" "$@"
       `,
       "creation-harness",
@@ -1189,6 +1210,19 @@ test("STAGE 1 AT-1.6i: Real launcher execution - Literal argument preservation t
     });
 
     assert.equal(harnessChild.status, 0, `Namespace-creation harness failed: ${harnessChild.stderr}`);
+    assert.ok(
+      harnessChild.stderr.includes("[HARNESS PRE-STATE VERIFIED]"),
+      "Harness pre-creation state verification must pass"
+    );
+    assert.ok(
+      !harnessChild.stderr.includes("[HARNESS FATAL]"),
+      "Harness setup must not encounter any errors"
+    );
+    // Affirmative assertion that the namespace-creation branch actually ran:
+    assert.ok(
+      harnessChild.stderr.includes("[LOLIXCO LAUNCHER] Establishing new isolated kernel network namespace via unshare..."),
+      "Must prove that the unshare -rn namespace-creation branch actually ran"
+    );
     assert.equal(
       existsSync(injectionMarker),
       false,
