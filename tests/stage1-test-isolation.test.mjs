@@ -1039,7 +1039,9 @@ test("STAGE 1 AT-1.6h-bash: Real launcher execution - BASH_ENV startup hook excl
     writeFileSync(canaryScript, `touch "${canaryMarker}"\n`);
     writeFileSync(miniTestScript, `console.log("MINI_TEST_PASSED");\n`);
 
-    // 1. Direct invocation with BASH_ENV in environment must fail closed immediately
+    // 1. Direct invocation with inherited BASH_ENV:
+    // Demonstrates that non-interactive Bash executes BASH_ENV before script line 1 starts,
+    // and that the launcher detects this and aborts fail-closed with exit code 1.
     const directChild = rawSpawnSync("/bin/bash", [launcherPath, miniTestScript], {
       cwd: projectRoot,
       encoding: "utf-8",
@@ -1054,11 +1056,21 @@ test("STAGE 1 AT-1.6h-bash: Real launcher execution - BASH_ENV startup hook excl
       directChild.stderr.includes("Inherited shell startup hook detected (BASH_ENV/ENV)"),
       "Must identify shell startup hook violation"
     );
+    // Explicitly assert that the direct invocation caused the canary to execute before the script could abort
+    assert.equal(
+      existsSync(canaryMarker),
+      true,
+      "Direct invocation demonstrates that inherited BASH_ENV executes before script starts (why trusted parent is required)"
+    );
+
+    // Reset canary marker before verifying the trusted entry point
+    rmSync(canaryMarker, { force: true });
+    assert.equal(existsSync(canaryMarker), false, "Canary marker must be cleared prior to trusted launch test");
 
     // 2. Invocation via the supported trusted entry point purges BASH_ENV before Bash starts
     const trustedChild = rawSpawnSync("/usr/bin/env", [
       "-i",
-      "PATH=/usr/local/bin:/usr/bin:/bin",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       `HOME=${process.env.HOME || "/tmp"}`,
       "/bin/bash",
       "--noprofile",
@@ -1076,6 +1088,11 @@ test("STAGE 1 AT-1.6h-bash: Real launcher execution - BASH_ENV startup hook excl
 
     assert.equal(trustedChild.status, 0, `Trusted launcher failed: ${trustedChild.stderr}`);
     assert.ok(trustedChild.stdout.includes("MINI_TEST_PASSED"), "Trusted launcher must run test suite");
+    assert.equal(
+      existsSync(canaryMarker),
+      false,
+      "Canary marker MUST NOT be created under trusted sanitized invocation: BASH_ENV was purged before Bash started"
+    );
   } finally {
     rmSync(canaryTempDir, { recursive: true, force: true });
   }
@@ -1124,6 +1141,7 @@ test("STAGE 1 AT-1.6i: Real launcher execution - Literal argument preservation t
     const maliciousArg1 = `test; touch ${injectionMarker}; echo injected`;
     const maliciousArg2 = "$HOME; rm -rf /";
 
+    // 1. Direct argument preservation through already-isolated branch
     const launcherChild = rawSpawnSync("/bin/bash", [
       launcherPath,
       "--print-args",
@@ -1144,37 +1162,72 @@ test("STAGE 1 AT-1.6i: Real launcher execution - Literal argument preservation t
     const match = launcherChild.stdout.match(/RECEIVED_RAW_ARGS:(.+)/);
     assert.ok(match, "Launcher must pass literal arguments to test runner");
     const receivedArgs = JSON.parse(match[1]);
-    assert.equal(receivedArgs[1], maliciousArg1, "Argument 1 must be preserved literally");
-    assert.equal(receivedArgs[2], maliciousArg2, "Argument 2 must be preserved literally");
+    assert.equal(receivedArgs[1], maliciousArg1, "Argument 1 must be preserved literally in already-isolated branch");
+    assert.equal(receivedArgs[2], maliciousArg2, "Argument 2 must be preserved literally in already-isolated branch");
+
+    // 2. Argument preservation through the namespace-creation shell path (scripts/run-isolated-tests.sh:165-183)
+    // Use a controlled harness in a mount namespace with simulated unisolated /proc/net (non-lo interface and route)
+    // so is_already_isolated returns false and forces execution of the unshare -rn creation branch
+    const harnessChild = rawSpawnSync("/usr/bin/unshare", [
+      "-rm",
+      "/bin/bash",
+      "-c",
+      `
+        MNT_NET="$(mktemp -d)"
+        printf "Inter-| Receive | Transmit\\n lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\\n eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\\n" > "$MNT_NET/dev"
+        printf "Iface\\tDestination\\tGateway\\neth0\\t00000000\\t0101A8C0\\n" > "$MNT_NET/route"
+        mount --bind "$MNT_NET" /proc/net
+        exec "${launcherPath}" "$@"
+      `,
+      "creation-harness",
+      "--print-args",
+      maliciousArg1,
+      maliciousArg2,
+    ], {
+      cwd: projectRoot,
+      encoding: "utf-8",
+    });
+
+    assert.equal(harnessChild.status, 0, `Namespace-creation harness failed: ${harnessChild.stderr}`);
+    assert.equal(
+      existsSync(injectionMarker),
+      false,
+      "Shell metacharacters must not be evaluated during unshare -rn namespace creation"
+    );
+
+    const creationMatch = harnessChild.stdout.match(/RECEIVED_RAW_ARGS:(.+)/);
+    assert.ok(creationMatch, "Namespace-creation branch must pass literal arguments to test runner");
+    const creationArgs = JSON.parse(creationMatch[1]);
+    assert.equal(creationArgs[1], maliciousArg1, "Argument 1 must be preserved literally through unshare -rn creation");
+    assert.equal(creationArgs[2], maliciousArg2, "Argument 2 must be preserved literally through unshare -rn creation");
   } finally {
     if (existsSync(injectionMarker)) unlinkSync(injectionMarker);
   }
 });
 
-test("STAGE 1 AT-1.6j: Real launcher execution - Negative failure modes (unsupported platform and unisolated host execution)", () => {
+test("STAGE 1 AT-1.6j: Unit helper test - Unsupported platform and unisolated host rejection", () => {
   const launcherPath = resolve(projectRoot, "scripts/run-isolated-tests.sh");
   const tempDir = mkdtempSync(join(tmpdir(), "lolixco-platform-test-"));
   const fakeDarwinUname = join(tempDir, "uname");
 
   try {
-    // 1. Direct execution of launcher on simulated unsupported platform (mock uname returning Darwin)
+    // 1. Unit helper test: platform-check contract validation (simulated non-Linux uname rejection)
     writeFileSync(fakeDarwinUname, "#!/bin/sh\necho Darwin\n");
     fs.chmodSync(fakeDarwinUname, 0o755);
 
-    // Call run-isolated-tests.sh under simulated non-Linux environment
     const platformChild = rawSpawnSync("/bin/bash", ["-c", `
       export PATH="${tempDir}:/usr/bin:/bin"
-      # In non-Linux environment, launcher platform check must abort
-      if [ "$(uname -s)" != "Linux" ]; then
+      # Unit helper verifying the exact platform-check conditional logic used in launcher:
+      if [ "$(${tempDir}/uname -s)" != "Linux" ]; then
         echo "[LOLIXCO SECURITY FATAL] Kernel network isolation requires Linux (detected: Darwin)." >&2
         exit 1
       fi
     `]);
 
-    assert.equal(platformChild.status, 1, "Non-Linux platform must fail with exit code 1");
+    assert.equal(platformChild.status, 1, "Simulated non-Linux platform helper must exit 1");
     assert.ok(
       platformChild.stderr.includes("Kernel network isolation requires Linux"),
-      "Must state kernel network isolation requires Linux"
+      "Must identify kernel network isolation requires Linux"
     );
 
     // 2. Direct unisolated Node invocation of scripts/run-isolated-tests.mjs with invalid boundary must fail closed

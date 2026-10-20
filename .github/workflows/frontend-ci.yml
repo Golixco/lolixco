@@ -67,10 +67,23 @@ jobs:
 
       - name: Verify kernel network namespace isolation pre-flight
         run: |
-          ./scripts/run-isolated-tests.sh --check-isolation
+          /usr/bin/env -i \
+            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            HOME="$HOME" \
+            CI="true" \
+            GITHUB_ACTIONS="true" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            /bin/bash --noprofile --norc ./scripts/run-isolated-tests.sh --check-isolation
 
       - name: Run unit and regression tests (network isolated)
-        run: pnpm test
+        run: |
+          /usr/bin/env -i \
+            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            HOME="$HOME" \
+            CI="true" \
+            GITHUB_ACTIONS="true" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            /bin/bash --noprofile --norc ./scripts/run-isolated-tests.sh
 
       - name: Run local media asset checks
         run: pnpm check:assets

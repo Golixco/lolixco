@@ -23,13 +23,14 @@ The isolation model operates at three independent boundaries:
 The supported, trusted security-test entry point is:
 
 ```bash
-/usr/bin/env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" /bin/bash --noprofile --norc ./scripts/run-isolated-tests.sh
+/usr/bin/env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" HOME="$HOME" /bin/bash --noprofile --norc ./scripts/run-isolated-tests.sh
 ```
 
 ### Security Boundary and Assumptions
-- **Pre-execution Boundary:** The trusted parent launcher executes `/usr/bin/env -i` with `--noprofile --norc`, purging all startup variables (`BASH_ENV`, `ENV`, `NODE_OPTIONS`, `NODE_PATH`, secrets, credentials) *before* `/bin/bash` or `node` starts.
-- **Fail-Closed Startup Detection:** If `scripts/run-isolated-tests.sh` is invoked directly with `BASH_ENV` or `ENV` set in the environment, it aborts immediately with exit code 1.
+- **Pre-execution Boundary & Startup Invariant:** When Bash starts non-interactively with `BASH_ENV` or `ENV` in the ambient environment, Bash evaluates the referenced script *before* line 1 of any shell script executes. Although `scripts/run-isolated-tests.sh` checks for `BASH_ENV` and terminates immediately with exit code 1 to prevent test execution, direct invocation on an already-compromised host cannot retrospectively undo commands executed during that pre-script startup phase. Therefore, the trusted startup contract requires a trusted parent (such as a controlled CI job or container entry point) that executes `/usr/bin/env -i ... /bin/bash --noprofile --norc` to purge all startup variables *before* Bash is spawned.
+- **Fail-Closed Startup Detection:** If `scripts/run-isolated-tests.sh` is invoked directly with `BASH_ENV` or `ENV` set in the environment, it aborts immediately with exit code 1, preventing test execution.
 - **Fixed Trusted PATH Policy:** The launcher sets `PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"` immediately and resolves all core utilities (`uname`, `env`, `unshare`, `ip`, `node`) strictly from trusted absolute paths or this fixed policy.
+- **CI Workflow Alignment:** In GitHub Actions CI, both the isolation preflight (`--check-isolation`) and the test suite invocation directly execute this sanitized entry command (`/usr/bin/env -i ... /bin/bash --noprofile --norc ./scripts/run-isolated-tests.sh`) to guarantee that preloads and ambient host variables cannot infect either verification step.
 - **Distinction from Host `npm test`:** Invoking `npm test` or `pnpm test` on a dirty host machine starts the host's Node/npm binary *before* the script is reached. In audited environments and CI, the trusted entry point must be invoked outside the dirty environment.
 
 ---
