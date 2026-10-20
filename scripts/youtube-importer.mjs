@@ -58,11 +58,36 @@ export function getCanonicalPath(targetPath) {
   }
 }
 
+let customProtectedRoots = [];
+let batchFileReader = readFileSync;
+
+/**
+ * Injects disposable protected roots for test isolation verification.
+ * Note: Injected roots expand protection for testing; canonical production paths
+ * (src/data, content/audit) are hardcoded and can never be weakened or cleared.
+ *
+ * @param {string[]} roots - Array of directory or file paths to treat as protected
+ */
+export function setProtectedRootsForTest(roots) {
+  customProtectedRoots = Array.isArray(roots)
+    ? roots.filter(Boolean).map((r) => getCanonicalPath(resolve(r)))
+    : [];
+}
+
+export function getProtectedRootsForTest() {
+  return [...customProtectedRoots];
+}
+
+export function setBatchFileReaderForTest(reader) {
+  batchFileReader = reader || readFileSync;
+}
+
 /**
  * Checks whether a given path targets a protected canonical production resource:
  * - The canonical catalog (src/data/edits.ts) or any file within src/data
  * - The canonical intake audit (content/audit/youtube-intake-audit.json) or any file within content/audit
  * - Symbolic link aliases to either
+ * - Any path within injected test-only protected roots
  */
 export function isProtectedProductionPath(targetPath) {
   if (!targetPath) return false;
@@ -83,6 +108,11 @@ export function isProtectedProductionPath(targetPath) {
   ) {
     return true;
   }
+  for (const root of customProtectedRoots) {
+    if (canonicalTarget === root || canonicalTarget.startsWith(root + "/")) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -90,6 +120,7 @@ export function isProtectedProductionPath(targetPath) {
  * Checks whether a given path targets a protected canonical private audit resource:
  * - The canonical intake audit (content/audit/youtube-intake-audit.json) or any file/directory within content/audit
  * - Symbolic link aliases to either
+ * - Any path within injected test-only protected roots
  */
 export function isProtectedAuditPath(targetPath) {
   if (!targetPath) return false;
@@ -97,11 +128,19 @@ export function isProtectedAuditPath(targetPath) {
   const canonicalAudit = getCanonicalPath(resolve(projectRoot, "content/audit/youtube-intake-audit.json"));
   const canonicalAuditDir = getCanonicalPath(resolve(projectRoot, "content/audit"));
 
-  return (
+  if (
     canonicalTarget === canonicalAudit ||
     canonicalTarget === canonicalAuditDir ||
     canonicalTarget.startsWith(canonicalAuditDir + "/")
-  );
+  ) {
+    return true;
+  }
+  for (const root of customProtectedRoots) {
+    if (canonicalTarget === root || canonicalTarget.startsWith(root + "/")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -490,14 +529,15 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
   // 1. Load batch items (supports batchFile, batchPath, raw text, JSON, array, or file path)
   let rawItems = [];
   const isLikelyPath = typeof batchInput === "string" && (
-    existsSync(batchInput) ||
     batchInput.startsWith("/") ||
     batchInput.startsWith("./") ||
     batchInput.startsWith("../") ||
     batchInput.includes("content/audit") ||
     batchInput.includes("src/data") ||
     batchInput.endsWith(".json") ||
-    batchInput.endsWith(".txt")
+    batchInput.endsWith(".txt") ||
+    customProtectedRoots.some((r) => batchInput.includes(r)) ||
+    (!batchInput.includes("\n") && !batchInput.trim().startsWith("[") && !batchInput.trim().startsWith("{") && existsSync(batchInput))
   );
   const resolvedFilePath = batchFile || (isLikelyPath ? batchInput : null);
 
@@ -529,7 +569,7 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
         processed: [],
       };
     }
-    const content = readFileSync(resolvedPath, "utf-8");
+    const content = batchFileReader(resolvedPath, "utf-8");
     rawItems = parseBatchInput(content, category, fandom, format);
   } else if (batchInput) {
     rawItems = parseBatchInput(batchInput, category, fandom, format);

@@ -20,7 +20,7 @@ permissions:
 jobs:
   validate:
     name: Frontend and Recsys Quality Checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -52,9 +52,15 @@ jobs:
       - name: Run TypeScript typecheck
         run: pnpm typecheck
 
+      - name: Configure Linux user namespace permissions for isolation runner
+        run: |
+          # Ubuntu 24.04 restricts unprivileged user namespaces via apparmor by default;
+          # Ensure unprivileged user namespaces can be created in the CI environment
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Verify kernel network namespace isolation pre-flight
         run: |
-          unshare -rn sh -c "ip link set lo up || exit 1; node -e 'console.log(\"Kernel network namespace pre-flight verified\")'"
+          ./scripts/run-isolated-tests.sh --print-args "ci-preflight"
 
       - name: Run unit and regression tests (network isolated)
         run: pnpm test

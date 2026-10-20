@@ -71,12 +71,40 @@ export function buildSanitizedEnvironment(sourceEnv = process.env, overrides = {
 }
 
 /**
+ * Checks whether IPv6 is explicitly disabled on the host via verified platform evidence:
+ * 1. /proc/sys/net/ipv6/conf/all/disable_ipv6 containing "1"
+ * 2. Absence of /proc/net/if_inet6 (IPv6 module not present/disabled)
+ *
+ * @param {string} [procDir="/proc"]
+ * @returns {boolean}
+ */
+export function isPlatformIpv6Disabled(procDir = "/proc") {
+  const disableIpv6Path = resolve(procDir, "sys/net/ipv6/conf/all/disable_ipv6");
+  const inet6Path = resolve(procDir, "net/if_inet6");
+
+  if (existsSync(disableIpv6Path)) {
+    try {
+      const content = readFileSync(disableIpv6Path, "utf-8").trim();
+      if (content === "1") return true;
+    } catch {
+      // Ignore read errors
+    }
+  }
+
+  if (!existsSync(inet6Path)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Validates operating system evidence of network isolation via Linux /proc filesystem.
  * Strictly fails closed if the platform is not Linux, if /proc evidence is missing,
  * unreadable, empty, malformed, or if any non-loopback network interfaces or routes exist.
  *
  * @param {string} [procDir="/proc"] - Custom proc directory for testing mock inputs
- * @returns {{ isolated: boolean, reason?: string, details?: any }}
+ * @returns {{ isolated: boolean, reason?: string, details?: any, ipv6Disabled?: boolean }}
  */
 export function checkProcNetworkIsolation(procDir = "/proc") {
   // 1. Explicitly reject unsupported non-Linux platforms
@@ -90,6 +118,7 @@ export function checkProcNetworkIsolation(procDir = "/proc") {
   const devPath = resolve(procDir, "net/dev");
   const routePath = resolve(procDir, "net/route");
   const ipv6RoutePath = resolve(procDir, "net/ipv6_route");
+  const ifInet6Path = resolve(procDir, "net/if_inet6");
 
   // 2. /proc/net/dev MUST exist and be readable
   if (!existsSync(devPath)) {
@@ -109,20 +138,65 @@ export function checkProcNetworkIsolation(procDir = "/proc") {
     };
   }
 
-  if (!devContent || typeof devContent !== "string" || !devContent.includes(":")) {
+  const rawDevLines = devContent.split("\n");
+  if (rawDevLines.length < 3) {
     return {
       isolated: false,
-      reason: "malformed_proc_net_dev: /proc/net/dev is empty or missing interface header",
+      reason: "malformed_proc_net_dev: /proc/net/dev has insufficient lines for Linux format",
     };
   }
 
-  const lines = devContent.split("\n").filter((l) => l.includes(":"));
-  const interfaces = lines.map((l) => l.split(":")[0].trim()).filter(Boolean);
+  // Header validation
+  if (
+    !/Inter-\|\s*Receive\s*\|\s*Transmit/.test(rawDevLines[0]) ||
+    !/face\s*\|bytes\s+packets/.test(rawDevLines[1])
+  ) {
+    return {
+      isolated: false,
+      reason: "malformed_proc_net_dev: /proc/net/dev missing expected Linux kernel table headers",
+    };
+  }
+
+  const dataLines = rawDevLines.slice(2).filter((l) => l.trim().length > 0);
+  const interfaces = [];
+
+  for (const line of dataLines) {
+    if (!line.includes(":")) {
+      return {
+        isolated: false,
+        reason: "malformed_proc_net_dev: line missing interface colon separator",
+      };
+    }
+    const [ifacePart, countersPart] = line.split(":");
+    const iface = ifacePart.trim();
+    if (!iface || !/^[a-zA-Z0-9_.-]+$/.test(iface)) {
+      return {
+        isolated: false,
+        reason: `malformed_proc_net_dev: invalid interface name '${iface}'`,
+      };
+    }
+    const counters = countersPart.trim().split(/\s+/).filter(Boolean);
+    // Linux /proc/net/dev has exactly 16 counters: 8 rx, 8 tx
+    if (counters.length !== 16 || !counters.every((c) => /^\d+$/.test(c))) {
+      return {
+        isolated: false,
+        reason: `malformed_proc_net_dev: interface '${iface}' does not have 16 valid numeric counters`,
+      };
+    }
+    interfaces.push(iface);
+  }
 
   if (interfaces.length === 0) {
     return {
       isolated: false,
       reason: "malformed_proc_net_dev: zero network interfaces parsed from /proc/net/dev",
+    };
+  }
+
+  if (!interfaces.includes("lo")) {
+    return {
+      isolated: false,
+      reason: "missing_loopback_interface: 'lo' interface is missing from /proc/net/dev",
     };
   }
 
@@ -133,13 +207,6 @@ export function checkProcNetworkIsolation(procDir = "/proc") {
       isolated: false,
       reason: `non_loopback_interfaces_detected: [${nonLoopback.join(", ")}]`,
       details: { interfaces, nonLoopback },
-    };
-  }
-
-  if (!interfaces.includes("lo")) {
-    return {
-      isolated: false,
-      reason: "missing_loopback_interface: 'lo' interface is missing from /proc/net/dev",
     };
   }
 
@@ -162,81 +229,186 @@ export function checkProcNetworkIsolation(procDir = "/proc") {
   }
 
   const routeLines = routeContent.trim().split("\n").filter(Boolean);
-  if (routeLines.length === 0 || !routeLines[0].includes("Iface")) {
+  if (routeLines.length === 0) {
     return {
       isolated: false,
-      reason: "malformed_proc_net_route: /proc/net/route is empty or missing header",
+      reason: "malformed_proc_net_route: /proc/net/route is empty",
     };
   }
 
-  // An isolated network namespace with zero external interfaces has ONLY the header line
+  // Header must contain all 11 standard columns
+  const expectedRouteHeaders = [
+    "Iface", "Destination", "Gateway", "Flags", "RefCnt",
+    "Use", "Metric", "Mask", "MTU", "Window", "IRTT"
+  ];
+  const headerCols = routeLines[0].trim().split(/\s+/);
+  const headerMatches = expectedRouteHeaders.every((h, i) => headerCols[i] === h);
+  if (!headerMatches) {
+    return {
+      isolated: false,
+      reason: "malformed_proc_net_route: /proc/net/route missing standard Linux column headers",
+    };
+  }
+
+  // In an isolated namespace, there must be 0 routing entries (only the 1 header line)
   if (routeLines.length > 1) {
+    for (const rLine of routeLines.slice(1)) {
+      const parts = rLine.trim().split(/\s+/);
+      if (parts.length !== 11) {
+        return {
+          isolated: false,
+          reason: "malformed_proc_net_route: route entry does not have 11 columns",
+        };
+      }
+      const [rIface, rDest, rGateway] = parts;
+      if (rIface !== "lo" || rDest !== "00000000" || rGateway !== "00000000") {
+        return {
+          isolated: false,
+          reason: `ipv4_routes_detected: non-loopback route via '${rIface}' present in /proc/net/route`,
+        };
+      }
+    }
+  }
+
+  // 4. IPv6 route and interface verification
+  const ipv6Disabled = isPlatformIpv6Disabled(procDir);
+
+  if (ipv6Disabled) {
+    return { isolated: true, ipv6Disabled: true };
+  }
+
+  // When IPv6 is enabled, /proc/net/ipv6_route MUST exist, be readable, and be non-empty
+  if (!existsSync(ipv6RoutePath)) {
     return {
       isolated: false,
-      reason: `ipv4_routes_detected: ${routeLines.length - 1} route entries present in /proc/net/route`,
-      details: { routeCount: routeLines.length - 1 },
+      reason: "missing_proc_net_ipv6_route: /proc/net/ipv6_route is absent on IPv6-enabled system",
     };
   }
 
-  // 4. /proc/net/ipv6_route (IPv6) check if present
-  if (existsSync(ipv6RoutePath)) {
-    try {
-      const v6Content = readFileSync(ipv6RoutePath, "utf-8").trim();
-      const v6Lines = v6Content.split("\n").filter(Boolean);
-      for (const line of v6Lines) {
-        const parts = line.trim().split(/\s+/);
-        // The last field in /proc/net/ipv6_route is the interface name
-        const iface = parts[parts.length - 1];
-        if (iface && iface !== "lo" && iface !== "*") {
-          return {
-            isolated: false,
-            reason: `ipv6_routes_detected: route via non-loopback interface '${iface}' present`,
-          };
-        }
-      }
-    } catch {
-      // If unreadable, fail closed
+  let v6Content;
+  try {
+    v6Content = readFileSync(ipv6RoutePath, "utf-8").trim();
+  } catch (err) {
+    return {
+      isolated: false,
+      reason: `unreadable_proc_net_ipv6_route: ${err.message}`,
+    };
+  }
+
+  if (!v6Content) {
+    return {
+      isolated: false,
+      reason: "empty_proc_net_ipv6_route_without_disabled_evidence: empty IPv6 route table without disabled IPv6 sysctl",
+    };
+  }
+
+  const hex32 = /^[0-9a-fA-F]{32}$/;
+  const hex8 = /^[0-9a-fA-F]{8}$/;
+  const hex2 = /^[0-9a-fA-F]{2}$/;
+
+  const v6Lines = v6Content.split("\n").filter(Boolean);
+  for (const line of v6Lines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length !== 10) {
       return {
         isolated: false,
-        reason: "unreadable_proc_net_ipv6_route",
+        reason: "malformed_proc_net_ipv6_route: each line must contain exactly 10 fields",
+      };
+    }
+    const [dest, destLen, src, srcLen, nexthop, metric, refcnt, usecnt, flags, iface] = parts;
+    if (
+      !hex32.test(dest) || !hex2.test(destLen) ||
+      !hex32.test(src) || !hex2.test(srcLen) ||
+      !hex32.test(nexthop) || !hex8.test(metric) ||
+      !hex8.test(refcnt) || !hex8.test(usecnt) ||
+      !hex8.test(flags)
+    ) {
+      return {
+        isolated: false,
+        reason: "malformed_proc_net_ipv6_route: field failed hex structure validation",
+      };
+    }
+    if (iface !== "lo" && iface !== "*") {
+      return {
+        isolated: false,
+        reason: `ipv6_routes_detected: non-loopback IPv6 route via '${iface}' present in /proc/net/ipv6_route`,
       };
     }
   }
 
-  return { isolated: true };
+  // Also check /proc/net/if_inet6: only lo may be present
+  if (existsSync(ifInet6Path)) {
+    try {
+      const inet6Content = readFileSync(ifInet6Path, "utf-8").trim();
+      if (inet6Content) {
+        for (const line of inet6Content.split("\n").filter(Boolean)) {
+          const parts = line.trim().split(/\s+/);
+          const devName = parts[parts.length - 1];
+          if (devName && devName !== "lo") {
+            return {
+              isolated: false,
+              reason: `non_loopback_ipv6_interfaces_detected: interface '${devName}' present in /proc/net/if_inet6`,
+            };
+          }
+        }
+      }
+    } catch {
+      return {
+        isolated: false,
+        reason: "unreadable_proc_net_if_inet6",
+      };
+    }
+  }
+
+  return { isolated: true, ipv6Disabled: false };
 }
 
 /**
  * Performs empirical socket-level negative and positive network probes.
  * Verifies at the OS socket boundary that:
  * 1. Loopback communication on 127.0.0.1 is fully functional.
- * 2. External IPv4 egress (e.g. to RFC 5737 TEST-NET-2 198.51.100.1) is blocked with ENETUNREACH / EHOSTUNREACH.
- * 3. External IPv6 egress (e.g. to RFC 3849 2001:db8::1) is blocked with ENETUNREACH.
+ * 2. External IPv4 egress (e.g. to RFC 5737 TEST-NET-2 198.51.100.1) is blocked strictly with ENETUNREACH.
+ * 3. External IPv6 egress (e.g. to RFC 3849 2001:db8::1) is blocked strictly with ENETUNREACH (or verified disabled).
  *
- * @returns {Promise<{ verified: boolean, reason?: string, details?: any }>}
+ * Rejects timeouts, synchronous exceptions, ambiguous errors (EINVAL, EADDRNOTAVAIL, ECONNREFUSED),
+ * and successful connections.
+ *
+ * @param {object} [options={}] - Optional injection seam for unit/regression tests
+ * @returns {Promise<{ verified: boolean, reason?: string, details?: any, ipv6Disabled?: boolean }>}
  */
-export async function verifyNetworkIsolationProbes() {
+export async function verifyNetworkIsolationProbes(options = {}) {
+  const {
+    connectFn = net.connect,
+    createServerFn = net.createServer,
+    isIpv6DisabledFn = isPlatformIpv6Disabled,
+    timeoutMs = 500,
+  } = options;
+
   // 1. Positive loopback test: verify we can bind and connect on 127.0.0.1
   const loopbackOk = await new Promise((resolve) => {
     let server;
     try {
-      server = net.createServer();
+      server = createServerFn();
       server.listen(0, "127.0.0.1", () => {
-        const port = server.address().port;
-        const client = net.connect(port, "127.0.0.1");
-        client.on("connect", () => {
-          client.destroy();
-          server.close(() => resolve({ ok: true }));
-        });
-        client.on("error", (err) => {
+        try {
+          const port = server.address().port;
+          const client = connectFn(port, "127.0.0.1");
+          client.on("connect", () => {
+            client.destroy();
+            server.close(() => resolve({ ok: true }));
+          });
+          client.on("error", (err) => {
+            server.close(() => resolve({ ok: false, error: err.message, code: err.code }));
+          });
+        } catch (err) {
           server.close(() => resolve({ ok: false, error: err.message, code: err.code }));
-        });
+        }
       });
       server.on("error", (err) => {
         resolve({ ok: false, error: err.message, code: err.code });
       });
     } catch (err) {
-      resolve({ ok: false, error: err.message });
+      resolve({ ok: false, error: err.message, code: err.code || "ERR_LOOPBACK_SYNC" });
     }
   });
 
@@ -251,12 +423,12 @@ export async function verifyNetworkIsolationProbes() {
   const ipv4Probe = await new Promise((resolve) => {
     let socket;
     const timer = setTimeout(() => {
-      if (socket) socket.destroy();
+      if (socket && typeof socket.destroy === "function") socket.destroy();
       resolve({ blocked: false, code: "ETIMEOUT" });
-    }, 500);
+    }, timeoutMs);
 
     try {
-      socket = net.connect(80, "198.51.100.1");
+      socket = connectFn(80, "198.51.100.1");
       socket.on("connect", () => {
         clearTimeout(timer);
         socket.destroy();
@@ -264,37 +436,43 @@ export async function verifyNetworkIsolationProbes() {
       });
       socket.on("error", (err) => {
         clearTimeout(timer);
-        // Under true OS kernel network isolation with no route, kernel immediately returns ENETUNREACH or EHOSTUNREACH
-        if (err.code === "ENETUNREACH" || err.code === "EHOSTUNREACH" || err.code === "EADDRNOTAVAIL") {
+        // Under true OS kernel network isolation with no route, kernel returns ENETUNREACH
+        if (err.code === "ENETUNREACH") {
           resolve({ blocked: true, code: err.code });
         } else {
-          resolve({ blocked: false, code: err.code, message: err.message });
+          // Reject ambiguous errors: EADDRNOTAVAIL, ECONNREFUSED, EINVAL, etc.
+          resolve({ blocked: false, code: err.code || "ERR_SOCKET_REJECTED", message: err.message });
         }
       });
     } catch (err) {
       clearTimeout(timer);
-      resolve({ blocked: true, code: err.code || "ERR_SOCKET_SYNC" });
+      // Synchronous exceptions FAIL verification (do not count as successful isolation)
+      resolve({ blocked: false, code: err.code || "ERR_SOCKET_SYNC", error: err.message });
     }
   });
 
   if (!ipv4Probe.blocked) {
     return {
       verified: false,
-      reason: `negative_ipv4_probe_failed: outbound socket was not denied by kernel (result: ${ipv4Probe.code})`,
+      reason: `negative_ipv4_probe_failed: outbound socket was not denied by kernel ENETUNREACH (result: ${ipv4Probe.code})`,
       details: ipv4Probe,
     };
   }
 
   // 3. Negative external IPv6 egress probe to documentation address 2001:db8::1
+  if (isIpv6DisabledFn()) {
+    return { verified: true, ipv6Disabled: true };
+  }
+
   const ipv6Probe = await new Promise((resolve) => {
     let socket;
     const timer = setTimeout(() => {
-      if (socket) socket.destroy();
+      if (socket && typeof socket.destroy === "function") socket.destroy();
       resolve({ blocked: false, code: "ETIMEOUT" });
-    }, 500);
+    }, timeoutMs);
 
     try {
-      socket = net.connect(80, "2001:db8::1");
+      socket = connectFn(80, "2001:db8::1");
       socket.on("connect", () => {
         clearTimeout(timer);
         socket.destroy();
@@ -302,27 +480,30 @@ export async function verifyNetworkIsolationProbes() {
       });
       socket.on("error", (err) => {
         clearTimeout(timer);
-        if (err.code === "ENETUNREACH" || err.code === "EHOSTUNREACH" || err.code === "EADDRNOTAVAIL" || err.code === "EINVAL") {
+        // Under true OS kernel network isolation with no route, kernel returns ENETUNREACH
+        if (err.code === "ENETUNREACH") {
           resolve({ blocked: true, code: err.code });
         } else {
-          resolve({ blocked: false, code: err.code, message: err.message });
+          // Reject ambiguous errors: EINVAL, EADDRNOTAVAIL, etc.
+          resolve({ blocked: false, code: err.code || "ERR_SOCKET_REJECTED", message: err.message });
         }
       });
     } catch (err) {
       clearTimeout(timer);
-      resolve({ blocked: true, code: err.code || "ERR_SOCKET_SYNC" });
+      // Synchronous exceptions FAIL verification
+      resolve({ blocked: false, code: err.code || "ERR_SOCKET_SYNC", error: err.message });
     }
   });
 
   if (!ipv6Probe.blocked) {
     return {
       verified: false,
-      reason: `negative_ipv6_probe_failed: outbound IPv6 socket was not denied by kernel (result: ${ipv6Probe.code})`,
+      reason: `negative_ipv6_probe_failed: outbound IPv6 socket was not denied by kernel ENETUNREACH (result: ${ipv6Probe.code})`,
       details: ipv6Probe,
     };
   }
 
-  return { verified: true };
+  return { verified: true, ipv6Disabled: false };
 }
 
 /**
@@ -346,6 +527,27 @@ async function main() {
       console.error("[LOLIXCO SECURITY FATAL] Invalid argument containing null byte detected.");
       process.exit(1);
     }
+  }
+
+  // Support pre-flight check flags
+  if (rawArgs.includes("--version") || rawArgs.includes("--check-isolation")) {
+    const procCheck = checkProcNetworkIsolation();
+    if (!procCheck.isolated) {
+      console.error(`[LOLIXCO SECURITY FATAL] Isolation check failed: ${procCheck.reason}`);
+      process.exit(1);
+    }
+    const probeCheck = await verifyNetworkIsolationProbes();
+    if (!probeCheck.verified) {
+      console.error(`[LOLIXCO SECURITY FATAL] Isolation probe failed: ${probeCheck.reason}`);
+      process.exit(1);
+    }
+    console.log("Lolixco Network-Isolated Test Runner v5 (kernel network namespace verified)");
+    process.exit(0);
+  }
+
+  if (rawArgs.includes("--print-args")) {
+    console.log("RECEIVED_RAW_ARGS:" + JSON.stringify(rawArgs));
+    process.exit(0);
   }
 
   // Check if we are already inside a verified isolated network boundary
@@ -379,68 +581,21 @@ async function main() {
     process.exit(child.status ?? (child.signal ? 1 : 0));
   }
 
-  // If LOLIXCO_KERNEL_ISOLATED was claimed by caller, but /proc check failed, reject fail-closed!
-  if (process.env.LOLIXCO_KERNEL_ISOLATED === "1") {
-    console.error(
-      `[LOLIXCO SECURITY FATAL] LOLIXCO_KERNEL_ISOLATED=1 was claimed, but operating system isolation check failed: ${procCheck.reason}`
-    );
-    process.exit(1);
-  }
-
-  // Check platform support before attempting unshare
-  if (process.platform !== "linux") {
-    console.error(
-      `[LOLIXCO SECURITY FATAL] Linux operating system required for kernel network isolation (detected: ${process.platform}). Unisolated execution is prohibited.`
-    );
-    process.exit(1);
-  }
-
-  // Attempt to establish isolation via unshare -rn with explicit loopback initialization
-  const scriptPath = fileURLToPath(import.meta.url);
-  const sanitizedHostEnv = buildSanitizedEnvironment(process.env);
-
-  // Use positional parameters to avoid any shell interpolation or metacharacter expansion
-  const unshareCmd =
-    'ip link set lo up || { echo "[LOLIXCO SECURITY FATAL] Failed to configure loopback interface in isolated network namespace" >&2; exit 1; }; exec "$@"';
-
-  const unshareArgs = [
-    "-rn",
-    "sh",
-    "-c",
-    unshareCmd,
-    "--",
-    process.execPath,
-    scriptPath,
-    ...rawArgs,
-  ];
-
-  const unshareResult = spawnSync("unshare", unshareArgs, {
-    cwd: __projectRoot,
-    stdio: "inherit",
-    env: sanitizedHostEnv,
-  });
-
-  if (unshareResult.error) {
-    if (unshareResult.error.code === "ENOENT") {
-      console.error(
-        "[LOLIXCO SECURITY FATAL] Linux 'unshare' utility is not installed. Kernel network isolation cannot be established."
-      );
-    } else {
-      console.error(
-        `[LOLIXCO SECURITY FATAL] Failed to spawn unshare network namespace: ${unshareResult.error.message}`
-      );
-    }
-    console.error(
-      "Unisolated test execution is strictly prohibited. Tests require verified OS network namespace or container isolation."
-    );
-    process.exit(1);
-  }
-
-  process.exit(unshareResult.status ?? (unshareResult.signal ? 1 : 0));
+  // If NOT inside verified isolation: FAIL CLOSED!
+  // Do NOT claim Node can sanitize preloads that already executed.
+  console.error(
+    `[LOLIXCO SECURITY FATAL] Operating system network isolation is not active: ${procCheck.reason}`
+  );
+  console.error(
+    "[LOLIXCO SECURITY FATAL] Security tests must be launched via the trusted shell launcher (./scripts/run-isolated-tests.sh) or within a verified network-isolated container."
+  );
+  console.error(
+    "Unisolated test execution is strictly prohibited. Tests require verified OS network namespace or container isolation."
+  );
+  process.exit(1);
 }
 
 // Only run main if executed directly
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main();
 }
-
