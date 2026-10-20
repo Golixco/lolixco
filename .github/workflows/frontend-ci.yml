@@ -52,7 +52,11 @@ jobs:
       - name: Run TypeScript typecheck
         run: pnpm typecheck
 
-      - name: Run unit and regression tests
+      - name: Verify kernel network namespace isolation pre-flight
+        run: |
+          unshare -rn sh -c "ip link set lo up || exit 1; node -e 'console.log(\"Kernel network namespace pre-flight verified\")'"
+
+      - name: Run unit and regression tests (network isolated)
         run: pnpm test
 
       - name: Run local media asset checks

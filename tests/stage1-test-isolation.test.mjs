@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -23,12 +23,18 @@ import {
 import { isAllowedLoopback, sanitizeForError } from "./register-ts.mjs";
 import * as isolatedChildProcess from "./isolated-child-process.mjs";
 import {
+  checkProcNetworkIsolation,
+  verifyNetworkIsolationProbes,
+  buildSanitizedEnvironment,
+} from "../scripts/run-isolated-tests.mjs";
+import {
   ingestYouTubeBatch,
   safeAtomicWriteFileSync,
   createAuditBackup,
   restoreAuditBackup,
   CANONICAL_AUDIT_PATH,
   isProtectedProductionPath,
+  isProtectedAuditPath,
 } from "../scripts/youtube-importer.mjs";
 import {
   approveReviewItem,
@@ -460,30 +466,317 @@ test("STAGE 1 AT-1.6e: TLS socket egress (node:tls) and named connect exports ar
   });
 });
 
-test("STAGE 1 AT-1.6f: Kernel network isolation and child process / external executable egress denial", () => {
-  // Spawn child node attempting external socket egress
-  const child = spawnSync("node", ["-e", `
+test("STAGE 1 AT-1.6f: Genuine OS-level kernel network boundary isolation (no JS hooks, pure native node & python)", () => {
+  // 1. Pure native Node process WITHOUT --import ./tests/register-ts.mjs bootstrap
+  // Tests IPv4 egress, IPv6 egress, custom DNS lookup spoofing, and loopback control
+  const nodeKernelChild = spawnSync(process.execPath, [
+    "--no-warnings",
+    "-e",
+    `
     import net from "node:net";
-    const s = net.connect(80, "8.8.8.8");
-    s.on("error", (e) => {
-      console.log("CHILD_SOCKET_ERR:" + e.code);
-      process.exit(0);
+    import http from "node:http";
+
+    const results = {};
+    let pending = 4;
+
+    function finish() {
+      pending--;
+      if (pending <= 0) {
+        console.log("KERNEL_PROBE_JSON:" + JSON.stringify(results));
+        process.exit(0);
+      }
+    }
+
+    // A. External IPv4 socket to documentation IP 198.51.100.1 (RFC 5737 TEST-NET-2)
+    const s4 = net.connect(80, "198.51.100.1");
+    s4.on("error", (err) => {
+      results.ipv4 = { code: err.code, message: err.message, deniedBy: "os_kernel" };
+      finish();
     });
+    s4.on("connect", () => {
+      results.ipv4 = { code: "CONNECTED", deniedBy: "none" };
+      s4.destroy();
+      finish();
+    });
+
+    // B. External IPv6 socket to documentation IPv6 2001:db8::1 (RFC 3849)
+    const s6 = net.connect(80, "2001:db8::1");
+    s6.on("error", (err) => {
+      results.ipv6 = { code: err.code, message: err.message, deniedBy: "os_kernel" };
+      finish();
+    });
+    s6.on("connect", () => {
+      results.ipv6 = { code: "CONNECTED", deniedBy: "none" };
+      s6.destroy();
+      finish();
+    });
+
+    // C. Custom DNS lookup override attempting to resolve to 198.51.100.1
+    const sCustom = net.connect({
+      host: "custom-dns-target.internal",
+      port: 80,
+      lookup: (h, o, cb) => {
+        if (o && o.all) {
+          cb(null, [{ address: "198.51.100.1", family: 4 }]);
+        } else {
+          cb(null, "198.51.100.1", 4);
+        }
+      },
+    });
+    sCustom.on("error", (err) => {
+      results.customDns = { code: err.code, message: err.message, deniedBy: "os_kernel" };
+      finish();
+    });
+    sCustom.on("connect", () => {
+      results.customDns = { code: "CONNECTED", deniedBy: "none" };
+      sCustom.destroy();
+      finish();
+    });
+
+    // D. Positive loopback control: must succeed inside isolated network namespace
+    const server = http.createServer((req, res) => res.end("OS_LOOPBACK_CONTROL_OK"));
+    server.listen(0, "127.0.0.1", () => {
+      const port = server.address().port;
+      http.get(\`http://127.0.0.1:\${port}\`, (res) => {
+        let body = "";
+        res.on("data", (c) => body += c);
+        res.on("end", () => {
+          results.loopback = { ok: true, data: body };
+          server.close(() => finish());
+        });
+      }).on("error", (err) => {
+        results.loopback = { ok: false, error: err.code };
+        server.close(() => finish());
+      });
+    });
+
     setTimeout(() => {
-      console.error("CHILD_SOCKET_TIMEOUT");
+      console.log("KERNEL_PROBE_JSON:" + JSON.stringify(results));
       process.exit(1);
-    }, 2000);
-  `], {
+    }, 2500);
+    `
+  ], {
+    cwd: projectRoot,
+    encoding: "utf-8",
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      // Zero test isolation JS hooks or preload flags
+    },
+  });
+
+  assert.equal(nodeKernelChild.status, 0, `Node kernel probe child failed: ${nodeKernelChild.stderr}`);
+  const nodeMatch = nodeKernelChild.stdout.match(/KERNEL_PROBE_JSON:(.+)/);
+  assert.ok(nodeMatch, "Node probe must emit KERNEL_PROBE_JSON");
+  const nodeResults = JSON.parse(nodeMatch[1]);
+
+  // Assert denials originate from the OS kernel boundary (ENETUNREACH / EHOSTUNREACH), NOT JavaScript hooks
+  assert.notEqual(nodeResults.ipv4.code, "ENETWORK_BLOCKED_TEST_MODE", "OS kernel probe must not be intercepted by JS hook");
+  assert.ok(
+    nodeResults.ipv4.code === "ENETUNREACH" || nodeResults.ipv4.code === "EHOSTUNREACH",
+    `Outbound IPv4 socket must be denied by OS kernel (got ${nodeResults.ipv4.code})`
+  );
+  assert.notEqual(nodeResults.ipv6.code, "ENETWORK_BLOCKED_TEST_MODE", "OS kernel probe must not be intercepted by JS hook");
+  assert.ok(
+    nodeResults.ipv6.code === "ENETUNREACH" || nodeResults.ipv6.code === "EHOSTUNREACH" || nodeResults.ipv6.code === "EINVAL",
+    `Outbound IPv6 socket must be denied by OS kernel (got ${nodeResults.ipv6.code})`
+  );
+  assert.ok(
+    nodeResults.customDns.code === "ENETUNREACH" || nodeResults.customDns.code === "EHOSTUNREACH",
+    `Custom DNS socket to external IP must be denied by OS kernel (got ${nodeResults.customDns.code})`
+  );
+  assert.equal(nodeResults.loopback.ok, true, "Loopback control connection must succeed inside isolated namespace");
+  assert.equal(nodeResults.loopback.data, "OS_LOOPBACK_CONTROL_OK", "Loopback data must match expected payload");
+
+  // 2. Descendant process isolation: Child Node spawns grandchild Node
+  const descendantChild = spawnSync(process.execPath, [
+    "--no-warnings",
+    "-e",
+    `
+    import { spawnSync } from "node:child_process";
+    const grandchild = spawnSync(process.execPath, ["-e", \`
+      import net from "node:net";
+      const s = net.connect(80, "198.51.100.1");
+      s.on("error", (e) => {
+        console.log("GRANDCHILD_ERR:" + e.code);
+        process.exit(0);
+      });
+      s.on("connect", () => {
+        console.log("GRANDCHILD_CONNECTED");
+        s.destroy();
+        process.exit(1);
+      });
+    \`], { encoding: "utf-8" });
+    console.log(grandchild.stdout);
+    process.exit(grandchild.status ?? 0);
+    `
+  ], {
+    cwd: projectRoot,
+    encoding: "utf-8",
+  });
+  assert.equal(descendantChild.status, 0, `Descendant process should execute cleanly: ${descendantChild.stderr}`);
+  assert.ok(
+    descendantChild.stdout.includes("GRANDCHILD_ERR:ENETUNREACH") ||
+    descendantChild.stdout.includes("GRANDCHILD_ERR:EHOSTUNREACH"),
+    "Descendant grandchild process must be denied outbound networking by OS kernel"
+  );
+
+  // 3. Independent external executable probe (Python 3 without Node.js runtime)
+  const pythonChild = spawnSync("python3", [
+    "-c",
+    `
+import socket, sys, json
+
+results = {}
+
+# External IPv4 egress
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect(("198.51.100.1", 80))
+    results["ipv4"] = {"denied": False, "code": "CONNECTED"}
+except OSError as e:
+    results["ipv4"] = {"denied": True, "errno": e.errno, "strerror": e.strerror}
+
+# External IPv6 egress
+s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s6.settimeout(0.5)
+try:
+    s6.connect(("2001:db8::1", 80))
+    results["ipv6"] = {"denied": False, "code": "CONNECTED"}
+except OSError as e:
+    results["ipv6"] = {"denied": True, "errno": e.errno, "strerror": e.strerror}
+
+# Positive loopback control
+try:
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    cli.connect(("127.0.0.1", port))
+    conn, _ = srv.accept()
+    conn.sendall(b"PY_LOOPBACK_VERIFIED")
+    received = cli.recv(64)
+    results["loopback"] = {"ok": True, "data": received.decode()}
+    cli.close()
+    conn.close()
+    srv.close()
+except Exception as e:
+    results["loopback"] = {"ok": False, "error": str(e)}
+
+print("PYTHON_KERNEL_JSON:" + json.dumps(results))
+    `
+  ], {
     cwd: projectRoot,
     encoding: "utf-8",
   });
 
-  assert.equal(child.status, 0, `Child process should handle network error cleanly: ${child.stderr}`);
-  assert.ok(
-    child.stdout.includes("CHILD_SOCKET_ERR:ENETWORK_BLOCKED_TEST_MODE") ||
-    child.stdout.includes("CHILD_SOCKET_ERR:ENETUNREACH"),
-    "Child process network attempt must be denied by hook or kernel isolation"
-  );
+  assert.equal(pythonChild.status, 0, `Python external executable probe failed: ${pythonChild.stderr}`);
+  const pyMatch = pythonChild.stdout.match(/PYTHON_KERNEL_JSON:(.+)/);
+  assert.ok(pyMatch, "Python probe must emit PYTHON_KERNEL_JSON");
+  const pyResults = JSON.parse(pyMatch[1]);
+
+  assert.equal(pyResults.ipv4.denied, true, "Python outbound IPv4 socket must be denied by OS kernel");
+  assert.equal(pyResults.ipv4.errno, 101, `Python IPv4 denial must be errno 101 (ENETUNREACH), got: ${JSON.stringify(pyResults.ipv4)}`);
+  assert.equal(pyResults.ipv6.denied, true, "Python outbound IPv6 socket must be denied by OS kernel");
+  assert.equal(pyResults.ipv6.errno, 101, `Python IPv6 denial must be errno 101 (ENETUNREACH), got: ${JSON.stringify(pyResults.ipv6)}`);
+  assert.equal(pyResults.loopback.ok, true, "Python loopback communication must succeed inside isolated namespace");
+  assert.equal(pyResults.loopback.data, "PY_LOOPBACK_VERIFIED", "Python loopback data must match");
+});
+
+test("STAGE 1 AT-1.6g: Phase 1 Blocker Regression - Isolation runner fail-closed detection and safe environment", () => {
+  // 1. Missing /proc/net/dev directory fails closed
+  const missingProc = checkProcNetworkIsolation("/nonexistent/proc/boundary");
+  assert.equal(missingProc.isolated, false, "Missing proc dir must report isolated: false");
+  assert.ok(missingProc.reason.includes("missing_proc_net_dev"), "Reason must specify missing_proc_net_dev");
+
+  // 2. Empty or malformed /proc/net/dev fails closed
+  const tempProc = mkdtempSync(join(tmpdir(), "lolixco-proc-test-"));
+  try {
+    const netDir = join(tempProc, "net");
+    mkdirSync(netDir, { recursive: true });
+
+    // Empty net/dev
+    writeFileSync(join(netDir, "dev"), "");
+    const emptyDev = checkProcNetworkIsolation(tempProc);
+    assert.equal(emptyDev.isolated, false, "Empty dev must fail closed");
+
+    // Malformed net/dev (no header)
+    writeFileSync(join(netDir, "dev"), "random text without interface colons");
+    const malformedDev = checkProcNetworkIsolation(tempProc);
+    assert.equal(malformedDev.isolated, false, "Malformed dev must fail closed");
+
+    // Non-loopback interfaces in net/dev (e.g. eth0 present)
+    writeFileSync(
+      join(netDir, "dev"),
+      "Inter-| Receive | Transmit\n face |bytes packets|bytes packets\n  lo: 0 0 0 0\n  eth0: 0 0 0 0\n"
+    );
+    const nonLoDev = checkProcNetworkIsolation(tempProc);
+    assert.equal(nonLoDev.isolated, false, "Dev with eth0 must fail closed");
+    assert.ok(nonLoDev.reason.includes("non_loopback_interfaces_detected"), "Must identify non-loopback interface");
+
+    // Valid lo in dev, but IPv4 routes exist in route file
+    writeFileSync(
+      join(netDir, "dev"),
+      "Inter-| Receive | Transmit\n face |bytes packets|bytes packets\n  lo: 0 0 0 0\n"
+    );
+    writeFileSync(
+      join(netDir, "route"),
+      "Iface\tDestination\tGateway\neth0\t00000000\t0101A8C0\n"
+    );
+    const routedNet = checkProcNetworkIsolation(tempProc);
+    assert.equal(routedNet.isolated, false, "Route table with external gateway must fail closed");
+    assert.ok(routedNet.reason.includes("ipv4_routes_detected"), "Must identify ipv4_routes_detected");
+  } finally {
+    rmSync(tempProc, { recursive: true, force: true });
+  }
+
+  // 3. Startup preload canary test: NODE_OPTIONS is stripped and does NOT execute
+  const canaryTempDir = mkdtempSync(join(tmpdir(), "lolixco-canary-preload-"));
+  const canaryMarker = join(canaryTempDir, "canary_executed.marker");
+  const canaryScript = join(canaryTempDir, "malicious_preload.cjs");
+
+  try {
+    writeFileSync(canaryScript, `require("node:fs").writeFileSync(${JSON.stringify(canaryMarker)}, "pwned");`);
+
+    // Verify buildSanitizedEnvironment excludes NODE_OPTIONS
+    const dirtyEnv = {
+      PATH: process.env.PATH,
+      NODE_OPTIONS: `--require ${canaryScript}`,
+      NODE_PATH: "/untrusted/node/path",
+      SECRET_API_KEY: "super_secret_token",
+      AWS_SECRET_ACCESS_KEY: "aws_secret",
+      npm_config_token: "npm_secret",
+    };
+    const cleanEnv = buildSanitizedEnvironment(dirtyEnv);
+    assert.equal(cleanEnv.NODE_OPTIONS, undefined, "buildSanitizedEnvironment must strip NODE_OPTIONS");
+    assert.equal(cleanEnv.NODE_PATH, undefined, "buildSanitizedEnvironment must strip NODE_PATH");
+    assert.equal(cleanEnv.SECRET_API_KEY, undefined, "buildSanitizedEnvironment must strip secret keys");
+    assert.equal(cleanEnv.AWS_SECRET_ACCESS_KEY, undefined, "buildSanitizedEnvironment must strip AWS secrets");
+    assert.equal(cleanEnv.npm_config_token, undefined, "buildSanitizedEnvironment must strip npm variables");
+  } finally {
+    rmSync(canaryTempDir, { recursive: true, force: true });
+  }
+
+  // 4. Shell metacharacters are safely passed literally rather than evaluated
+  const echoMarker = join(tmpdir(), `shell-injection-marker-${Date.now()}.txt`);
+  try {
+    const safeSpawn = spawnSync(process.execPath, [
+      "-e",
+      "console.log(JSON.stringify(process.argv.slice(1)));",
+      `test; touch ${echoMarker}; echo injected`,
+      "$HOME; rm -rf /",
+    ], { encoding: "utf-8" });
+
+    assert.equal(safeSpawn.status, 0);
+    const parsedArgs = JSON.parse(safeSpawn.stdout.trim());
+    assert.equal(parsedArgs[0], `test; touch ${echoMarker}; echo injected`);
+    assert.equal(parsedArgs[1], "$HOME; rm -rf /");
+    assert.equal(existsSync(echoMarker), false, "Shell metacharacters must NOT be evaluated or create files");
+  } finally {
+    if (existsSync(echoMarker)) unlinkSync(echoMarker);
+  }
 });
 
 test("STAGE 1 AT-1.6d: Named HTTP/HTTPS imports and syncBuiltinESMExports interception", async () => {
@@ -1372,6 +1665,69 @@ test("STAGE 1 AT-1.12d: Draft publication constraints (allowDraft prevents unapp
     });
     assert.equal(draftWriteResult.success, false, "Drafts are forbidden during catalog writes");
     assert.ok(draftWriteResult.errors.some((e) => e.includes("'allowDraft' is strictly forbidden during catalog writes")));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("STAGE 1 AT-1.12e: Phase 2 Blocker Regression - Protected audit read denial on batch-input file paths (direct and symlink)", async () => {
+  const tempDir = createDisposableTempDir("lolixco-batch-audit-test-");
+  const tempAuditDest = join(tempDir, "temp-destination-audit.json");
+  const symlinkSource = join(tempDir, "symlink-protected-audit.json");
+
+  try {
+    // 1. Direct path targeting CANONICAL_AUDIT_PATH as batch input must fail closed in write mode
+    const directBatchResult = await ingestYouTubeBatch({
+      batchId: "attack-batch-direct",
+      batchFile: CANONICAL_AUDIT_PATH,
+      auditFilePath: tempAuditDest,
+      dryRun: false,
+    });
+    assert.equal(directBatchResult.success, false, "Batch input targeting canonical audit directly must fail closed");
+    assert.ok(
+      directBatchResult.errors.some((e) => e.includes("resolves to a protected production path")),
+      "Must state batch input path resolves to a protected production path"
+    );
+
+    // 2. Direct path targeting CANONICAL_AUDIT_PATH as batch input must fail closed in dry-run mode
+    const dryRunBatchResult = await ingestYouTubeBatch({
+      batchId: "attack-batch-dryrun",
+      batchFile: CANONICAL_AUDIT_PATH,
+      auditFilePath: tempAuditDest,
+      dryRun: true,
+    });
+    assert.equal(dryRunBatchResult.success, false, "Batch input targeting canonical audit in dry-run must fail closed");
+    assert.ok(
+      dryRunBatchResult.errors.some((e) => e.includes("resolves to a protected production path")),
+      "Dry-run must also block canonical audit as batch input"
+    );
+
+    // 3. Symlink alias pointing to CANONICAL_AUDIT_PATH as batch input must be resolved and denied fail-closed
+    symlinkSync(CANONICAL_AUDIT_PATH, symlinkSource);
+    const symlinkBatchResult = await ingestYouTubeBatch({
+      batchId: "attack-batch-symlink",
+      batchFile: symlinkSource,
+      auditFilePath: tempAuditDest,
+      dryRun: false,
+    });
+    assert.equal(symlinkBatchResult.success, false, "Batch input via symlink to canonical audit must fail closed");
+    assert.ok(
+      symlinkBatchResult.errors.some((e) => e.includes("resolves to a protected production path")),
+      "Symlink targeting canonical audit must be caught and blocked"
+    );
+
+    // 4. Batch input passed via string batchInput matching CANONICAL_AUDIT_PATH directly
+    const stringInputResult = await ingestYouTubeBatch({
+      batchId: "attack-batch-string",
+      batchInput: CANONICAL_AUDIT_PATH,
+      auditFilePath: tempAuditDest,
+      dryRun: false,
+    });
+    assert.equal(stringInputResult.success, false, "String batchInput targeting canonical audit directly must fail closed");
+    assert.ok(
+      stringInputResult.errors.some((e) => e.includes("resolves to a protected production path")),
+      "String batchInput targeting canonical audit must be blocked"
+    );
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

@@ -44,18 +44,21 @@ npm test
 ## 4. Isolation Runner Mechanics (`scripts/run-isolated-tests.mjs`)
 
 When `npm test` runs:
-1. **Self-Inspection:** The runner inspects `/proc/net/dev`, `/proc/net/route`, and probes outbound UDP/TCP sockets to determine if the process is already executing inside an isolated network namespace.
-2. **Namespace Launch:** If not isolated, the runner re-executes under:
+1. **Platform Validation:** The runner immediately verifies `process.platform === "linux"`. Unsupported platforms fail closed.
+2. **Environment Sanitization:** An explicit allowlisted environment (`buildSanitizedEnvironment()`) is constructed before launching child processes. `NODE_OPTIONS`, `NODE_PATH`, `npm_*`, and any credentials matching `/KEY|SECRET|TOKEN|AUTH|PASS|CRED/i` are strictly stripped.
+3. **OS Boundary Self-Inspection:** The runner inspects `/proc/net/dev`, `/proc/net/route`, and `/proc/net/ipv6_route`. If `/proc` evidence is missing, unreadable, empty, malformed, or if any non-loopback interfaces or routes exist, it fails closed.
+4. **Empirical Network Probes:** Inside the isolated boundary, the runner verifies:
+   - Loopback communication on `127.0.0.1` binds and connects successfully.
+   - Outbound IPv4 socket connect to documentation address `198.51.100.1` immediately produces `ENETUNREACH` or `EHOSTUNREACH` from the kernel.
+   - Outbound IPv6 socket connect to documentation address `2001:db8::1` immediately produces `ENETUNREACH`.
+5. **Namespace Launch with Mandatory Loopback:** If not yet isolated, the runner spawns:
    ```bash
-   unshare -rn sh -c "ip link set lo up 2>/dev/null; node --import ./tests/register-ts.mjs --test tests/*.test.mjs"
+   unshare -rn sh -c 'ip link set lo up || { echo "[LOLIXCO SECURITY FATAL] Failed to configure loopback interface in isolated network namespace" >&2; exit 1; }; exec "$@"' -- "$NODE_EXEC" "$RUNNER_SCRIPT" "$@"
    ```
-3. **Fail-Closed Verification:** Inside the child process, the runner verifies:
-   - Only `lo` exists in `/proc/net/dev`.
-   - `/proc/net/route` contains 0 routes.
-   - Outbound socket attempts immediately produce `ENETUNREACH` (errno 101).
-   - Local loopback (`127.0.0.1`, `::1`) operates normally for deterministic test fixtures and mock servers.
-4. **Anti-Tampering:** If `LOLIXCO_KERNEL_ISOLATED=1` is passed in an unisolated environment, the runner detects route presence and fails closed immediately with exit code 1.
-5. **No Silent Fallback:** If `unshare` is missing or unprivileged user namespaces are disabled, the runner exits with code 1 and prints remediation instructions. It never runs unisolated.
+   Positional arguments are passed after `--` to prevent any shell metacharacter expansion or argument injection.
+6. **Mandatory Loopback Setup:** If `ip link set lo up` fails, execution halts immediately with a non-zero exit code. Tests are never started after a failed loopback initialization.
+7. **Anti-Tampering:** If `LOLIXCO_KERNEL_ISOLATED=1` is asserted in an unisolated environment, the runner detects route presence and halts immediately with exit code 1.
+8. **No Silent Fallback:** If `unshare` is missing or unprivileged user namespaces are disabled, the runner exits with code 1. It never falls back to unisolated execution.
 
 ---
 

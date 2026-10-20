@@ -489,10 +489,38 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
 
   // 1. Load batch items (supports batchFile, batchPath, raw text, JSON, array, or file path)
   let rawItems = [];
-  const resolvedFilePath = batchFile || (typeof batchInput === "string" && existsSync(batchInput) ? batchInput : null);
+  const isLikelyPath = typeof batchInput === "string" && (
+    existsSync(batchInput) ||
+    batchInput.startsWith("/") ||
+    batchInput.startsWith("./") ||
+    batchInput.startsWith("../") ||
+    batchInput.includes("content/audit") ||
+    batchInput.includes("src/data") ||
+    batchInput.endsWith(".json") ||
+    batchInput.endsWith(".txt")
+  );
+  const resolvedFilePath = batchFile || (isLikelyPath ? batchInput : null);
 
   if (resolvedFilePath) {
     const resolvedPath = resolve(resolvedFilePath);
+
+    // Reject protected audit and production paths supplied as batch input under test isolation
+    if (isTestIsolationActive() && (isProtectedProductionPath(resolvedPath) || isProtectedAuditPath(resolvedPath))) {
+      return {
+        success: false,
+        batchId,
+        processedCount: 0,
+        newCount: 0,
+        duplicateCount: 0,
+        errors: [
+          `Batch input blocked: Batch input path '${resolvedPath}' resolves to a protected production path under active test isolation. Ingestion during test execution cannot read protected audit or production files as batch sources.`,
+        ],
+        warnings,
+        items: [],
+        auditFilePath,
+      };
+    }
+
     if (!existsSync(resolvedPath)) {
       return {
         success: false,
@@ -1067,6 +1095,11 @@ Options:
 
   if (isTestIsolationActive() && (isProtectedProductionPath(options.auditFilePath) || isProtectedAuditPath(options.auditFilePath))) {
     console.error(`\n❌ Ingestion aborted: Accessing protected production audit file '${options.auditFilePath}' is prohibited under active test isolation.`);
+    return 1;
+  }
+
+  if (options.batchPath && isTestIsolationActive() && (isProtectedProductionPath(options.batchPath) || isProtectedAuditPath(options.batchPath))) {
+    console.error(`\n❌ Ingestion aborted: Accessing protected production batch input file '${options.batchPath}' is prohibited under active test isolation.`);
     return 1;
   }
 
