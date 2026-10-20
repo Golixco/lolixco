@@ -155,6 +155,9 @@ export function fork(modulePath, args, options) {
   return _origFork(modulePath, finalArgs, opts);
 }
 
+export const rawSpawnSync = _origSpawnSync;
+export const rawExecFileSync = _origExecFileSync;
+
 export default {
   spawn,
   spawnSync,
@@ -164,4 +167,7 @@ export default {
   execFileSync,
   fork,
   createIsolatedEnvironment,
+  rawSpawnSync,
+  rawExecFileSync,
 };
+

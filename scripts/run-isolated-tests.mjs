@@ -71,31 +71,84 @@ export function buildSanitizedEnvironment(sourceEnv = process.env, overrides = {
 }
 
 /**
- * Checks whether IPv6 is explicitly disabled on the host via verified platform evidence:
- * 1. /proc/sys/net/ipv6/conf/all/disable_ipv6 containing "1"
- * 2. Absence of /proc/net/if_inet6 (IPv6 module not present/disabled)
+ * Classifies the host IPv6 platform status into one of three explicit states:
+ * - "VERIFIED_DISABLED": Affirmative evidence that IPv6 is disabled at kernel level.
+ * - "VERIFIED_ENABLED": Affirmative evidence that IPv6 is active and enabled.
+ * - "UNKNOWN": Missing, unreadable, malformed, or contradictory evidence.
+ *
+ * @param {string} [procDir="/proc"]
+ * @returns {"VERIFIED_DISABLED" | "VERIFIED_ENABLED" | "UNKNOWN"}
+ */
+export function getPlatformIpv6Status(procDir = "/proc") {
+  const disableIpv6Path = resolve(procDir, "sys/net/ipv6/conf/all/disable_ipv6");
+  const inet6Path = resolve(procDir, "net/if_inet6");
+
+  let sysctlValue = null;
+  if (existsSync(disableIpv6Path)) {
+    try {
+      const content = readFileSync(disableIpv6Path, "utf-8").trim();
+      if (content === "0" || content === "1") {
+        sysctlValue = content;
+      } else {
+        // Malformed sysctl value (e.g. non-numeric, float, unexpected string)
+        return "UNKNOWN";
+      }
+    } catch {
+      // Unreadable sysctl
+      return "UNKNOWN";
+    }
+  } else {
+    // Sysctl file does not exist
+    return "UNKNOWN";
+  }
+
+  const inet6Exists = existsSync(inet6Path);
+
+  // Case 1: sysctl says "1" (disabled).
+  // Must be consistent: inet6Path absent or empty.
+  if (sysctlValue === "1") {
+    if (!inet6Exists) {
+      return "VERIFIED_DISABLED";
+    }
+    try {
+      const inet6Content = readFileSync(inet6Path, "utf-8").trim();
+      if (inet6Content === "") {
+        return "VERIFIED_DISABLED";
+      }
+      // Contradiction: sysctl says disabled, but active inet6 interfaces exist
+      return "UNKNOWN";
+    } catch {
+      return "UNKNOWN";
+    }
+  }
+
+  // Case 2: sysctl says "0" (enabled).
+  // Must be consistent: inet6Path exists and is readable.
+  if (sysctlValue === "0") {
+    if (!inet6Exists) {
+      // Contradiction: sysctl says enabled, but /proc/net/if_inet6 is missing
+      return "UNKNOWN";
+    }
+    try {
+      readFileSync(inet6Path, "utf-8");
+      return "VERIFIED_ENABLED";
+    } catch {
+      // Unreadable /proc/net/if_inet6
+      return "UNKNOWN";
+    }
+  }
+
+  return "UNKNOWN";
+}
+
+/**
+ * Backward-compatible helper: returns true ONLY if IPv6 is affirmatively verified disabled.
  *
  * @param {string} [procDir="/proc"]
  * @returns {boolean}
  */
 export function isPlatformIpv6Disabled(procDir = "/proc") {
-  const disableIpv6Path = resolve(procDir, "sys/net/ipv6/conf/all/disable_ipv6");
-  const inet6Path = resolve(procDir, "net/if_inet6");
-
-  if (existsSync(disableIpv6Path)) {
-    try {
-      const content = readFileSync(disableIpv6Path, "utf-8").trim();
-      if (content === "1") return true;
-    } catch {
-      // Ignore read errors
-    }
-  }
-
-  if (!existsSync(inet6Path)) {
-    return true;
-  }
-
-  return false;
+  return getPlatformIpv6Status(procDir) === "VERIFIED_DISABLED";
 }
 
 /**
@@ -271,9 +324,17 @@ export function checkProcNetworkIsolation(procDir = "/proc") {
   }
 
   // 4. IPv6 route and interface verification
-  const ipv6Disabled = isPlatformIpv6Disabled(procDir);
+  const ipv6Status = getPlatformIpv6Status(procDir);
 
-  if (ipv6Disabled) {
+  if (ipv6Status === "UNKNOWN") {
+    return {
+      isolated: false,
+      reason:
+        "ipv6_state_unknown: affirmative IPv6 status could not be verified from platform evidence (missing, unreadable, malformed, or contradictory /proc/sys/net/ipv6 or /proc/net/if_inet6)",
+    };
+  }
+
+  if (ipv6Status === "VERIFIED_DISABLED") {
     return { isolated: true, ipv6Disabled: true };
   }
 
@@ -380,7 +441,8 @@ export async function verifyNetworkIsolationProbes(options = {}) {
   const {
     connectFn = net.connect,
     createServerFn = net.createServer,
-    isIpv6DisabledFn = isPlatformIpv6Disabled,
+    getIpv6StatusFn = null,
+    isIpv6DisabledFn = null,
     timeoutMs = 500,
   } = options;
 
@@ -460,7 +522,23 @@ export async function verifyNetworkIsolationProbes(options = {}) {
   }
 
   // 3. Negative external IPv6 egress probe to documentation address 2001:db8::1
-  if (isIpv6DisabledFn()) {
+  let effectiveIpv6Status = "UNKNOWN";
+  if (typeof getIpv6StatusFn === "function") {
+    effectiveIpv6Status = getIpv6StatusFn();
+  } else if (typeof isIpv6DisabledFn === "function") {
+    effectiveIpv6Status = isIpv6DisabledFn() ? "VERIFIED_DISABLED" : "VERIFIED_ENABLED";
+  } else {
+    effectiveIpv6Status = getPlatformIpv6Status();
+  }
+
+  if (effectiveIpv6Status === "UNKNOWN") {
+    return {
+      verified: false,
+      reason: "ipv6_state_unknown: unable to verify affirmative IPv6 platform status for probes",
+    };
+  }
+
+  if (effectiveIpv6Status === "VERIFIED_DISABLED") {
     return { verified: true, ipv6Disabled: true };
   }
 
@@ -530,7 +608,7 @@ async function main() {
   }
 
   // Support pre-flight check flags
-  if (rawArgs.includes("--version") || rawArgs.includes("--check-isolation")) {
+  if (rawArgs.includes("--check-isolation")) {
     const procCheck = checkProcNetworkIsolation();
     if (!procCheck.isolated) {
       console.error(`[LOLIXCO SECURITY FATAL] Isolation check failed: ${procCheck.reason}`);
@@ -541,11 +619,22 @@ async function main() {
       console.error(`[LOLIXCO SECURITY FATAL] Isolation probe failed: ${probeCheck.reason}`);
       process.exit(1);
     }
-    console.log("Lolixco Network-Isolated Test Runner v5 (kernel network namespace verified)");
+    console.log("[LOLIXCO ISOLATION PREFLIGHT] Kernel network namespace isolation verified successfully.");
+    process.exit(0);
+  }
+
+  if (rawArgs.includes("--version")) {
+    console.log("Lolixco Network-Isolated Test Runner v6");
     process.exit(0);
   }
 
   if (rawArgs.includes("--print-args")) {
+    // Diagnostic argument printing requires verified isolation boundary
+    const procCheck = checkProcNetworkIsolation();
+    if (!procCheck.isolated) {
+      console.error(`[LOLIXCO SECURITY FATAL] Isolation check failed: ${procCheck.reason}`);
+      process.exit(1);
+    }
     console.log("RECEIVED_RAW_ARGS:" + JSON.stringify(rawArgs));
     process.exit(0);
   }

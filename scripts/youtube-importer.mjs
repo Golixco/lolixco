@@ -15,7 +15,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, copyFileSync, realpathSync, lstatSync, readlinkSync } from "node:fs";
-import { resolve, dirname, basename } from "node:path";
+import { resolve, dirname, basename, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
 import { fetchYouTubeVideoMetadata, loadEnvConfig, isTestIsolationActive } from "./youtube-api.mjs";
@@ -58,6 +58,16 @@ export function getCanonicalPath(targetPath) {
   }
 }
 
+export const IMMUTABLE_PROD_CATALOG = resolve(projectRoot, "src/data/edits.ts");
+export const IMMUTABLE_PROD_SRC_DATA_DIR = resolve(projectRoot, "src/data");
+export const IMMUTABLE_PROD_AUDIT = resolve(projectRoot, "content/audit/youtube-intake-audit.json");
+export const IMMUTABLE_PROD_AUDIT_DIR = resolve(projectRoot, "content/audit");
+
+function isPathInside(childPath, parentDir) {
+  const rel = relative(parentDir, childPath);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
 let customProtectedRoots = [];
 let batchFileReader = readFileSync;
 
@@ -67,11 +77,18 @@ let batchFileReader = readFileSync;
  * (src/data, content/audit) are hardcoded and can never be weakened or cleared.
  *
  * @param {string[]} roots - Array of directory or file paths to treat as protected
+ * @returns {() => void} Cleanup function to reset injected roots
  */
 export function setProtectedRootsForTest(roots) {
+  if (process.env.LOLIXCO_TEST_MODE !== "1") {
+    throw new Error("setProtectedRootsForTest is only permitted in test mode (LOLIXCO_TEST_MODE=1)");
+  }
   customProtectedRoots = Array.isArray(roots)
-    ? roots.filter(Boolean).map((r) => getCanonicalPath(resolve(r)))
+    ? roots.filter(Boolean).map((r) => resolve(r))
     : [];
+  return () => {
+    customProtectedRoots = [];
+  };
 }
 
 export function getProtectedRootsForTest() {
@@ -79,7 +96,13 @@ export function getProtectedRootsForTest() {
 }
 
 export function setBatchFileReaderForTest(reader) {
+  if (process.env.LOLIXCO_TEST_MODE !== "1") {
+    throw new Error("setBatchFileReaderForTest is only permitted in test mode (LOLIXCO_TEST_MODE=1)");
+  }
   batchFileReader = reader || readFileSync;
+  return () => {
+    batchFileReader = readFileSync;
+  };
 }
 
 /**
@@ -88,31 +111,44 @@ export function setBatchFileReaderForTest(reader) {
  * - The canonical intake audit (content/audit/youtube-intake-audit.json) or any file within content/audit
  * - Symbolic link aliases to either
  * - Any path within injected test-only protected roots
+ *
+ * Evaluates without accessing canonical workstation filesystem metadata during fixture tests.
  */
 export function isProtectedProductionPath(targetPath) {
   if (!targetPath) return false;
-  const canonicalTarget = getCanonicalPath(targetPath);
-  const canonicalCatalog = getCanonicalPath(resolve(projectRoot, "src/data/edits.ts"));
-  const canonicalAudit = getCanonicalPath(resolve(projectRoot, "content/audit/youtube-intake-audit.json"));
-  const canonicalAuditDir = getCanonicalPath(resolve(projectRoot, "content/audit"));
-  const canonicalSrcData = getCanonicalPath(resolve(projectRoot, "src/data"));
 
-  if (canonicalTarget === canonicalCatalog || canonicalTarget === canonicalAudit) {
-    return true;
+  // 1. Injected test-only protected roots check (disposable fixtures)
+  if (customProtectedRoots.length > 0) {
+    const canonicalTarget = getCanonicalPath(targetPath);
+    for (const root of customProtectedRoots) {
+      if (canonicalTarget === root || isPathInside(canonicalTarget, root)) {
+        return true;
+      }
+    }
   }
+
+  // 2. Lexical check against immutable production paths (zero filesystem metadata access)
+  const resolvedTarget = resolve(targetPath);
   if (
-    canonicalTarget.startsWith(canonicalAuditDir + "/") ||
-    canonicalTarget === canonicalAuditDir ||
-    canonicalTarget.startsWith(canonicalSrcData + "/") ||
-    canonicalTarget === canonicalSrcData
+    resolvedTarget === IMMUTABLE_PROD_CATALOG ||
+    resolvedTarget === IMMUTABLE_PROD_AUDIT ||
+    isPathInside(resolvedTarget, IMMUTABLE_PROD_AUDIT_DIR) ||
+    isPathInside(resolvedTarget, IMMUTABLE_PROD_SRC_DATA_DIR)
   ) {
     return true;
   }
-  for (const root of customProtectedRoots) {
-    if (canonicalTarget === root || canonicalTarget.startsWith(root + "/")) {
-      return true;
-    }
+
+  // 3. Symlink alias resolution (only evaluates symlinks on targetPath)
+  const canonicalTarget = getCanonicalPath(targetPath);
+  if (
+    canonicalTarget === IMMUTABLE_PROD_CATALOG ||
+    canonicalTarget === IMMUTABLE_PROD_AUDIT ||
+    isPathInside(canonicalTarget, IMMUTABLE_PROD_AUDIT_DIR) ||
+    isPathInside(canonicalTarget, IMMUTABLE_PROD_SRC_DATA_DIR)
+  ) {
+    return true;
   }
+
   return false;
 }
 
@@ -121,25 +157,40 @@ export function isProtectedProductionPath(targetPath) {
  * - The canonical intake audit (content/audit/youtube-intake-audit.json) or any file/directory within content/audit
  * - Symbolic link aliases to either
  * - Any path within injected test-only protected roots
+ *
+ * Evaluates without accessing canonical workstation filesystem metadata during fixture tests.
  */
 export function isProtectedAuditPath(targetPath) {
   if (!targetPath) return false;
-  const canonicalTarget = getCanonicalPath(targetPath);
-  const canonicalAudit = getCanonicalPath(resolve(projectRoot, "content/audit/youtube-intake-audit.json"));
-  const canonicalAuditDir = getCanonicalPath(resolve(projectRoot, "content/audit"));
 
+  // 1. Injected test-only protected roots check (disposable fixtures)
+  if (customProtectedRoots.length > 0) {
+    const canonicalTarget = getCanonicalPath(targetPath);
+    for (const root of customProtectedRoots) {
+      if (canonicalTarget === root || isPathInside(canonicalTarget, root)) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Lexical check against immutable production audit paths (zero filesystem metadata access)
+  const resolvedTarget = resolve(targetPath);
   if (
-    canonicalTarget === canonicalAudit ||
-    canonicalTarget === canonicalAuditDir ||
-    canonicalTarget.startsWith(canonicalAuditDir + "/")
+    resolvedTarget === IMMUTABLE_PROD_AUDIT ||
+    isPathInside(resolvedTarget, IMMUTABLE_PROD_AUDIT_DIR)
   ) {
     return true;
   }
-  for (const root of customProtectedRoots) {
-    if (canonicalTarget === root || canonicalTarget.startsWith(root + "/")) {
-      return true;
-    }
+
+  // 3. Symlink alias resolution (only evaluates symlinks on targetPath)
+  const canonicalTarget = getCanonicalPath(targetPath);
+  if (
+    canonicalTarget === IMMUTABLE_PROD_AUDIT ||
+    isPathInside(canonicalTarget, IMMUTABLE_PROD_AUDIT_DIR)
+  ) {
+    return true;
   }
+
   return false;
 }
 
