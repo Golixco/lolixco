@@ -7,9 +7,12 @@ name: Frontend CI
       - feat/discovery-ui-search
       - feat/recsys-baseline
       - feat/mission5-recsys-integration
+      - feat/mission7c-jjk-landscape-batch-01
+      - feat/stage1-security-finalization
   pull_request:
     branches:
       - main
+      - feat/stage1-security-finalization
 
 permissions:
   contents: read

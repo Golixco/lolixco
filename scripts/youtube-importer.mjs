@@ -14,11 +14,11 @@
  * - Executable CLI entrypoint with exit codes
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, copyFileSync, realpathSync, lstatSync, readlinkSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
-import { fetchYouTubeVideoMetadata, loadEnvConfig } from "./youtube-api.mjs";
+import { fetchYouTubeVideoMetadata, loadEnvConfig, isTestIsolationActive } from "./youtube-api.mjs";
 
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 
@@ -30,9 +30,90 @@ try {
 }
 
 /**
+ * Resolves the canonical, symlink-free absolute filesystem path.
+ * Handles existing files, non-existent target files with existing parent directories,
+ * and symbolic link aliases.
+ */
+export function getCanonicalPath(targetPath) {
+  if (!targetPath) return "";
+  let resolved = resolve(targetPath);
+  try {
+    const stat = lstatSync(resolved);
+    if (stat.isSymbolicLink()) {
+      const linkTarget = readlinkSync(resolved);
+      resolved = resolve(dirname(resolved), linkTarget);
+    }
+  } catch {
+    // File may not exist yet
+  }
+  try {
+    return realpathSync(resolved);
+  } catch {
+    const parent = dirname(resolved);
+    try {
+      return resolve(realpathSync(parent), basename(resolved));
+    } catch {
+      return resolved;
+    }
+  }
+}
+
+/**
+ * Checks whether a given path targets a protected canonical production resource:
+ * - The canonical catalog (src/data/edits.ts) or any file within src/data
+ * - The canonical intake audit (content/audit/youtube-intake-audit.json) or any file within content/audit
+ * - Symbolic link aliases to either
+ */
+export function isProtectedProductionPath(targetPath) {
+  if (!targetPath) return false;
+  const canonicalTarget = getCanonicalPath(targetPath);
+  const canonicalCatalog = getCanonicalPath(resolve(projectRoot, "src/data/edits.ts"));
+  const canonicalAudit = getCanonicalPath(resolve(projectRoot, "content/audit/youtube-intake-audit.json"));
+  const canonicalAuditDir = getCanonicalPath(resolve(projectRoot, "content/audit"));
+  const canonicalSrcData = getCanonicalPath(resolve(projectRoot, "src/data"));
+
+  if (canonicalTarget === canonicalCatalog || canonicalTarget === canonicalAudit) {
+    return true;
+  }
+  if (
+    canonicalTarget.startsWith(canonicalAuditDir + "/") ||
+    canonicalTarget === canonicalAuditDir ||
+    canonicalTarget.startsWith(canonicalSrcData + "/") ||
+    canonicalTarget === canonicalSrcData
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Checks whether a given path targets a protected canonical private audit resource:
+ * - The canonical intake audit (content/audit/youtube-intake-audit.json) or any file/directory within content/audit
+ * - Symbolic link aliases to either
+ */
+export function isProtectedAuditPath(targetPath) {
+  if (!targetPath) return false;
+  const canonicalTarget = getCanonicalPath(targetPath);
+  const canonicalAudit = getCanonicalPath(resolve(projectRoot, "content/audit/youtube-intake-audit.json"));
+  const canonicalAuditDir = getCanonicalPath(resolve(projectRoot, "content/audit"));
+
+  return (
+    canonicalTarget === canonicalAudit ||
+    canonicalTarget === canonicalAuditDir ||
+    canonicalTarget.startsWith(canonicalAuditDir + "/")
+  );
+}
+
+/**
  * Safely writes a file using a sibling temporary file and atomic rename.
+ * In test mode, strictly prohibits writes to protected production destinations.
  */
 export function safeAtomicWriteFileSync(filePath, content) {
+  if (isTestIsolationActive() && (isProtectedProductionPath(filePath) || isProtectedAuditPath(filePath))) {
+    throw new Error(
+      `Write operation blocked: Path '${filePath}' resolves to a protected production path under active test isolation. Test execution cannot modify production files.`
+    );
+  }
   const dir = dirname(filePath);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -130,6 +211,11 @@ export function validateAuditDocument(auditData, auditFilePath = "audit.json") {
  * Creates a timestamped local backup of an audit file in content/audit/backups/
  */
 export function createAuditBackup(auditFilePath) {
+  if (isTestIsolationActive() && (isProtectedProductionPath(auditFilePath) || isProtectedAuditPath(auditFilePath))) {
+    throw new Error(
+      `Backup operation blocked: Audit file '${auditFilePath}' resolves to a protected production path under active test isolation.`
+    );
+  }
   if (!existsSync(auditFilePath)) return null;
 
   const baseDir = dirname(auditFilePath);
@@ -154,8 +240,21 @@ export function createAuditBackup(auditFilePath) {
 
 /**
  * Restores an audit file from a local backup file.
+ * Validates source and destination paths separately under test isolation.
  */
 export function restoreAuditBackup(backupPath, targetAuditPath = CANONICAL_AUDIT_PATH) {
+  if (isTestIsolationActive()) {
+    if (isProtectedProductionPath(targetAuditPath) || isProtectedAuditPath(targetAuditPath)) {
+      throw new Error(
+        `Restore operation blocked: Destination '${targetAuditPath}' resolves to a protected production path under active test isolation.`
+      );
+    }
+    if (isProtectedProductionPath(backupPath) || isProtectedAuditPath(backupPath)) {
+      throw new Error(
+        `Restore operation blocked: Backup source '${backupPath}' resolves to a protected production path under active test isolation.`
+      );
+    }
+  }
   if (!existsSync(backupPath)) {
     throw new Error(`Backup file not found at: ${backupPath}`);
   }
@@ -370,6 +469,23 @@ export async function ingestYouTubeBatch(inputOrOptions = {}, maybeOptions = {})
 
   const errors = [];
   const warnings = [];
+
+  // Reject access to protected canonical production audits during test isolation (both dryRun and mutating runs)
+  if (isTestIsolationActive() && (isProtectedProductionPath(auditFilePath) || isProtectedAuditPath(auditFilePath))) {
+    return {
+      success: false,
+      batchId,
+      processedCount: 0,
+      newCount: 0,
+      duplicateCount: 0,
+      errors: [
+        `Intake ingestion blocked: Target audit path '${auditFilePath}' resolves to a protected production path under active test isolation. Ingestion during test execution cannot read or modify canonical audit files.`,
+      ],
+      warnings,
+      items: [],
+      auditFilePath,
+    };
+  }
 
   // 1. Load batch items (supports batchFile, batchPath, raw text, JSON, array, or file path)
   let rawItems = [];
@@ -948,6 +1064,11 @@ Options:
   console.log(`Starting YouTube batch import [${options.batchId}]...`);
   if (options.dryRun) console.log("Mode: DRY-RUN (no files will be written)");
   if (options.mockMode) console.log("Mode: MOCK (synthetic offline test mode)");
+
+  if (isTestIsolationActive() && (isProtectedProductionPath(options.auditFilePath) || isProtectedAuditPath(options.auditFilePath))) {
+    console.error(`\n❌ Ingestion aborted: Accessing protected production audit file '${options.auditFilePath}' is prohibited under active test isolation.`);
+    return 1;
+  }
 
   const result = await ingestYouTubeBatch({
     batchId: options.batchId,

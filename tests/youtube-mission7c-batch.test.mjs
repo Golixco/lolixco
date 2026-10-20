@@ -1,11 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { normalizeYouTubeUrl } from "../scripts/youtube-normalizer.mjs";
-import { loadEnvConfig, fetchYouTubeVideoMetadata } from "../scripts/youtube-api.mjs";
+import {
+  loadEnvConfig,
+  fetchYouTubeVideoMetadata,
+  registerAuthorizedTestEnvDir,
+  unregisterAuthorizedTestEnvDir,
+} from "../scripts/youtube-api.mjs";
 import {
   evaluateEditorialClassification,
 } from "../scripts/youtube-editorial.mjs";
@@ -57,8 +63,9 @@ test("Mission 7C - Repository baseline & safety: demo catalog is preserved", () 
 });
 
 test("Mission 7C - Safe local environment configuration handling", () => {
-  const tmpDir = resolve(projectRoot, "content/audit/temp-test-env-" + Date.now());
+  const tmpDir = join(tmpdir(), "lolixco-test-env-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
+  registerAuthorizedTestEnvDir(tmpDir);
 
   try {
     // Write .env with fallback and .env.local with preferred value
@@ -82,6 +89,7 @@ test("Mission 7C - Safe local environment configuration handling", () => {
       delete process.env.TEST_YOUTUBE_KEY;
     }
   } finally {
+    unregisterAuthorizedTestEnvDir(tmpDir);
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
@@ -189,7 +197,7 @@ test("Mission 7C - Editorial classification: resolves Jujutsu Kaisen and landsca
 });
 
 test("Mission 7C - End-to-end ingestion and review workflow with 10 JJK landscape videos", async () => {
-  const tmpDir = resolve(projectRoot, "content/audit/temp-test-jjk-" + Date.now());
+  const tmpDir = join(tmpdir(), "lolixco-test-jjk-" + Date.now());
   const tmpAuditPath = resolve(tmpDir, "audit.json");
   mkdirSync(tmpDir, { recursive: true });
 
@@ -239,8 +247,21 @@ test("Mission 7C - End-to-end ingestion and review workflow with 10 JJK landscap
     });
     assert.equal(publishAttempt.success, false, "Compilation of synthetic mock data into live catalog must fail-closed");
     assert.ok(
-      publishAttempt.errors.some((e) => e.includes("synthetic") || e.includes("Mock")),
-      "Must reject synthetic records from live catalog publication"
+      publishAttempt.errors.some((e) => e.includes("synthetic") || e.includes("Mock") || e.includes("protected production path")),
+      "Must reject synthetic records or protected production writes from live catalog publication"
+    );
+
+    // Also verify mock records are rejected even when targeting a disposable fixture output
+    const tmpFixtureOutput = resolve(tmpDir, "fixture-edits.ts");
+    const fixturePublishAttempt = await compileYouTubeCatalog({
+      auditFilePath: tmpAuditPath,
+      outputPath: tmpFixtureOutput,
+      dryRun: false,
+    });
+    assert.equal(fixturePublishAttempt.success, false, "Mock data must be rejected even to fixture output");
+    assert.ok(
+      fixturePublishAttempt.errors.some((e) => e.includes("synthetic") || e.includes("Mock") || e.includes("draft") || e.includes("approved")),
+      "Must reject unapproved/synthetic records"
     );
 
     // 3. Exercise official YouTube Data API client pathway via offline HTTP stub
@@ -297,27 +318,41 @@ test("Mission 7C - End-to-end ingestion and review workflow with 10 JJK landscap
       assert.equal(officialIngestResult.success, true, "Official API ingestion must succeed");
       assert.equal(officialIngestResult.processedCount, 10, "Must process 10 items through official API client");
 
-      // Verify the generated audit trail has genuine provenance produced by the production client
+      // Verify the generated audit trail has synthetic provenance (cannot launder into genuine API provenance)
       const officialAudit = JSON.parse(readFileSync(testOfficialAuditPath, "utf-8"));
       for (const item of officialAudit.items) {
-        assert.equal(item.isMock, false, "Must not be marked mock");
-        assert.equal(item.provenance, "youtube_data_api_v3", "Must have genuine youtube_data_api_v3 provenance");
+        assert.equal(item.isMock, true, "Test-origin execution must be synthetic by construction");
+        assert.equal(item.provenance, "synthetic_mock", "Test-origin fetch cannot launder provenance into youtube_data_api_v3");
+        assert.equal(item.syntheticOrigin, "test_environment_mock", "Synthetic origin must reflect test environment");
         assert.equal(item.contentReviewStatus, "embed_eligible");
       }
 
+      // 4. Fail-closed safety: Even with API-shaped data, synthetic records CANNOT be approved for production
       const realApproveResult = await approveBatch("jjk-landscape-batch-01", {
         auditFilePath: testOfficialAuditPath,
       });
-      assert.equal(realApproveResult.success, true, "Legitimate YouTube Data API batch approval must succeed");
-      assert.equal(realApproveResult.approvedCount, 10, "Must approve all 10 verified items");
+      assert.equal(realApproveResult.success, false, "Approval must fail closed for synthetic mock data");
+      assert.ok(
+        realApproveResult.errors.some((e) => e.includes("synthetic mock metadata")),
+        "Approval error must cite synthetic mock metadata protection"
+      );
 
-      // 4. Verify compiler dry-run preview allocates stable IDs in range 100-109
+      // 5. Fail-closed publication: Mock/synthetic records CANNOT be published into live catalog
+      const publishAttempt = await compileYouTubeCatalog({
+        auditFilePath: testOfficialAuditPath,
+        outputPath: resolve(projectRoot, "src/data/edits.ts"),
+        dryRun: false,
+      });
+      assert.equal(publishAttempt.success, false, "Live catalog publication must fail-closed");
+
+      // 6. Preview mode with allowDraft verifies ID allocation and projection logic safely in memory
       const compilePreview = await compileYouTubeCatalog({
         auditFilePath: testOfficialAuditPath,
-        preview: true,
+        allowDraft: true,
+        dryRun: true,
       });
 
-      assert.equal(compilePreview.success, true, "Compilation preview must succeed on approved items");
+      assert.equal(compilePreview.success, true, "Compilation preview must succeed on draft items in memory");
       assert.equal(compilePreview.baseCount, 17, "Base count must be 17");
       assert.equal(compilePreview.newCount, 10, "New compiled edits must be 10");
       assert.equal(compilePreview.totalCount, 27, "Total compiled edits must be 27");
